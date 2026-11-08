@@ -10,40 +10,47 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 
 ## 当前完成度
 
-这一版已接入**本地文件解码与双目渲染**（里程碑 2），界面仍是骨架，凝视逻辑尚未实现：
+这一版把**凝视层**接入本地播放（里程碑 3）：S1–S3 全部控件、回中键、唤醒条、暂停/进度/±10 s 都由视线触发，不再需要点屏幕：
 
 | 已实现 | 说明 |
 |---|---|
 | 启动页 | 视镜标记 + `GAZELINE` 字标 + 副标题，无中文品牌名 |
-| 外层 HUD（静态） | 播放 Ø10°(0,-18)、±10 s Ø8°(±16,-18)、字幕(-30,-18)、菜单(+30,-18)、回中 Ø7.5°(-37,-25)、字幕 @-33、唤醒条 25°×3° @-39 |
-| HUD 收起态 | 只剩唤醒条与 1 px 进度线，注视点随 HUD 淡出 |
-| S5 校准页（静态） | 10°/5° 网格、四角十字、边缘圆环、中心十字、双眼对齐线、可读性样本、单眼遮盖测试、屈光/参数诊断分叉、四组步进器外观 |
+| 外层 HUD（S1–S3） | 播放 Ø10°(0,-18)、±10 s Ø8°(±16,-18)、字幕(-30,-18)、菜单(+30,-18)、回中 Ø7.5°(-37,-25)、字幕带 @-33、时间轴 @-11、顶部状态 @+39 |
+| 凝视命中 | 进入 0.85R、离开 1.15R，120 ms 去抖；聚焦 150 ms + 预备 250 ms 后才开始充能 |
+| 停留分档 | L1 1.2 s（播放/±10 s）、L2 1.8 s（字幕/菜单/回中）、L3 2.5 s（S4 退出，alpha5）；环显示剩余等待 |
+| 防连发 | 动作后 500 ms 冷却，且同一目标必须移出离开半径再回才可再次充能 |
+| 取消 | 移出目标 250 ms、角速度 >25°/s、返回键（物理/线控）立即取消；>10°/s 暂停充能，<6°/s 恢复 |
+| 回中键 | 1.2 s 充能 + 0.6 s 待发两段式；110 ms 遮罩 → 冻结画面 → 限速 180°/s（单帧 ≤2.5°）旋转 → 120 ms 淡出；1000 ms 冷却 |
+| 唤回 | 播放中闲置 5 s 开始淡出、6 s 只剩唤醒条 25°×3° @-39°；注视 0.8 s 唤回；暂停时永不隐藏（40% 亮度）；新视频前 15 s 常显 |
 | 本地视频播放（M2） | 点播放键 → 选 360 / SBS → 系统文件选择器选视频；MediaCodec 解码到 SurfaceTexture |
 | 解码器选择 | HEVC 优先 `c2.qti.hevc.decoder`，其次任意 qti、任意硬件、最后平台默认；日志记录实际 codec 名与 `isHardwareAccelerated` |
-| 360 管线 | 独立 `Projection360`：FOV 90°、k1 -0.20、k2 0.032、IPD 0°，等距柱状采样 + 镜头预畸变 |
-| SBS 管线 | 独立 `ProjectionSbs`：FOV 85°、k1 -0.26、k2 0.045、虚拟屏宽 70°，左右半幅各取一半 + 预畸变 |
-| 播放期交互 | 拖动转头、双击回中；有 Rotation Vector 时叠加真实头动，无传感器时可用拖动 |
-| 调试 HUD | 文件名 / 模式 / codec / 硬解 / 分辨率 / 解码帧 / 迟到帧 / GL 帧 / 解码与绘制帧率 / 镜头参数 |
+| 360 管线 | 独立 `Projection360`：水平 FOV 90°、k1 -0.20、k2 0.032、IPD 0°，等距柱状采样 + 镜头预畸变 |
+| SBS 管线 | 独立 `ProjectionSbs`：垂直 FOV 85°（水平约 90°）、k1 -0.26、k2 0.045、虚拟屏宽 70°，左右半幅各取一半 + 预畸变 |
+| 播放控制 | 播放/暂停、±10 s 跳转（`positionUs` 与时间轴同步）；字幕键切换开关并提示“暂无字幕轨” |
+| 调试 HUD | 文件名 / 格式 / 分辨率 / 进度 / 实际 codec 写在顶部两枚状态卡片，不再单独占用一行 |
 
-**里程碑 2 实测（模拟器，2026-11-08）**
+**里程碑 2/3 实测（模拟器，2026-11-08/09）**
 
 - 模拟器 `sdk_gphone64_x86_64`（ranchu），没有 Qualcomm 解码器；实际选中 `c2.goldfish.hevc.decoder`，`isHardwareAccelerated=true`（goldfish 的虚拟硬解，**不代表真机 qti 读数**）。
 - 8-bit HEVC Main 1280×640（360）与 1280×720（SBS）：解码 29.8–29.9 fps、GL 绘制 59.5–59.9 fps，迟到帧 0。
 - **10-bit HEVC（Main10）在模拟器上失败**：`GoldfishHevcHelper: error in decodeHeader: 0x43dd`，codec 直接进入 Released，App 报 `IllegalStateException` 并停播。真机 qti 是否支持 10-bit 尚未验证。
-- 360 拖动后视野变化、双击回中后回到中心列，均已截图确认。
+- 凝视链路：拖拽把目标移到视点中心后，150 ms 聚焦 + 250 ms 预备 → 环与“继续注视 X.X 秒”出现 → L1 1.2 s 执行；执行后再盯住同一目标不会连发，需先移出离开半径再回。
+- 回中：双击/凝视回中键均触发，遮罩、冻结、限速旋转与淡出完成，结束后视野回到锚定方向。
+- 唤回：播放中闲置 5–6 s 淡出到只剩唤醒条，注视 0.8 s 后 HUD 原样唤回；暂停时 HUD 常留。
+- 播放键执行后暂停/继续、快进键执行后 `seek 10000ms` 均在 `logcat` 与时间轴读数上确认；360 与 SBS 两种管线各跑一遍。
+- 模拟器没有真实头动，验证时用 `--ez sensor false` 启动 PlayerActivity，以拖拽代替转头（横屏拖拽按屏幕轴映射）。
 
 **未实现（不要在演示中当成可用功能）：**
 
 - 10-bit HEVC 真机硬解（模拟器已证实不可用，真机待验）
 - 音轨（当前只解码视频轨，无声音）
-- 播放控制（暂停 / 进度 / 快进 10 s / 字幕 / 菜单按钮仍是静态 HUD）
-- 凝视计时逻辑（命中迟滞、停留分档、角速度门控、误触冷却全部未实现）
+- 字幕渲染（字幕键只切换状态并提示“暂无字幕轨”）
+- S4 菜单与 L3 退出二次确认（菜单键当前提示“菜单将在 alpha5 开放”）
 - 校准步进器的实际调节与即时生效
-- SMB 串流
-- 关于页
+- SMB 串流、关于页
+- 72 Hz 刷新、长时间耐力测试
 
-
-当前页面切换靠**点屏幕**（HUD 预览 / S5 校准 / 收起 HUD），不是凝视触发。所有角度按 90° 单眼 FOV 定义，像素值随设备换算。
+启动页与 S5 校准预览页的切换仍靠点屏幕；**进入播放器后 HUD 全部走凝视**。所有角度按 90° 单眼 FOV 定义，像素值随设备换算。
 
 ## 构建
 
@@ -74,6 +81,7 @@ alpha 阶段两个 APK 都用 `debug.keystore` 签名（密码为 Android 调试
 1. 手机允许安装未知来源应用（或开启 USB 调试）。
 2. `adb install -r build/gazeline-<version>-release.apk`，或直接把 APK 传到手机点安装。
 3. 启动后 1.7 s 自动从字标进入 HUD 预览；底部三个按钮切换页面。
+4. 点播放键 → 选 360 / SBS → 系统文件选择器选片，进入播放器。播放器内：有 Rotation Vector 时转头控制视线，没有时拖拽模拟；把控件移到视点中心并停留即可充能，移开或按返回键取消。
 
 ## 版本号
 
@@ -102,11 +110,18 @@ powershell -File version-check.ps1
 
 ```
 app/src/main/AndroidManifest.xml
-app/src/main/java/com/yunyu697/gazeline/MainActivity.java
-app/src/main/java/com/yunyu697/gazeline/StageView.java
+app/src/main/java/com/yunyu697/gazeline/
+  MainActivity.java      启动页 / HUD 预览 / S5 校准预览 / 选片入口
+  StageView.java         预览页与校准页的骨架绘制
+  PlayerActivity.java    播放器：朝向合成、凝视 tick、回中动画、唤回
+  HudView.java           双视口 HUD（Canvas），角度即像素
+  HudSpec.java           角度表、时序与颜色的唯一来源
+  GazeController.java    凝视状态机：迟滞/去抖/预备/分档/冷却/锚点
+  Feedback.java          凝视音效（ToneGenerator）
+  VideoDecoder.java      MediaCodec 解码线程：暂停、跳转、循环
+  StereoRenderer.java    GL 双视口渲染与画面冻结
+  Projection360.java     360° 管线
+  ProjectionSbs.java     SBS 管线
 app/src/main/res/...
-build.ps1
-version-lib.ps1
-version-check.ps1
-version.txt
+build.ps1 / version-lib.ps1 / version-check.ps1 / version.txt
 ```

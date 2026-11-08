@@ -36,6 +36,7 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
     private final float[] texMatrix = new float[16];
 
     private volatile float[] rot = IDENTITY;
+    private volatile boolean freeze;
 
     private int textureId;
     private SurfaceTexture surfaceTexture;
@@ -68,6 +69,11 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
 
     void setRotation(float[] rowMajor3x3) {
         rot = rowMajor3x3;
+    }
+
+    /** Recenter holds the last decoded frame on screen while the world rotates. */
+    void setFreeze(boolean frozen) {
+        freeze = frozen;
     }
 
     VideoDecoder decoder() {
@@ -125,7 +131,7 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
         if (viewWidth <= 0 || viewHeight <= 0) {
             return;
         }
-        if (surfaceTexture != null) {
+        if (surfaceTexture != null && !freeze) {
             try {
                 surfaceTexture.updateTexImage();
                 surfaceTexture.getTransformMatrix(texMatrix);

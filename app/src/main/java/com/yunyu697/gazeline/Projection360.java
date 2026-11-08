@@ -85,7 +85,9 @@ final class Projection360 {
               int eye, FloatBuffer quad) {
         GLES20.glUseProgram(program);
 
-        float tanHalfY = (float) Math.tan(Math.toRadians(DEFAULT_FOV_Y / 2f));
+        // 90° horizontal field of view: the eye viewport's aspect then fixes the
+        // vertical FOV, so the HUD's angle table and the content use one scale.
+        float tanHalfY = (float) Math.tan(Math.toRadians(DEFAULT_FOV_Y / 2f)) / aspect;
         float eyeShift = eye == 0 ? -1f : 1f;
         eyeShift *= (float) Math.tan(Math.toRadians(DEFAULT_IPD_DEG / 2f));
 

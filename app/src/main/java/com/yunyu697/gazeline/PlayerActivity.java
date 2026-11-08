@@ -11,6 +11,7 @@ import android.opengl.Matrix;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.view.Surface;
 import android.view.View;
 import android.view.WindowManager;
@@ -20,51 +21,94 @@ import android.widget.Toast;
 import java.io.File;
 
 /**
- * Fullscreen stereo playback: GLSurfaceView underneath, head-locked HUD on top.
- * Head tracking comes from TYPE_ROTATION_VECTOR; without a sensor the panorama
- * still renders and drag still works (used on the emulator).
+ * Fullscreen stereo playback with the gaze layer. Orientation is
+ * world←camera = recenterCorrection * sensorBasis * roll/drag; the gaze
+ * controller anchors its HUD to the view direction captured on open, wake and
+ * recenter, so looking at a control is a head movement rather than a reticle
+ * chase. On the emulator (no sensor) drag simulates head movement.
  */
 public class PlayerActivity extends Activity
-        implements PlayerHudView.Listener, VideoDecoder.Listener, SensorEventListener {
+        implements HudView.Listener, GazeController.Listener,
+        VideoDecoder.Listener, SensorEventListener {
 
     static final String EXTRA_PATH = "path";
     static final String EXTRA_MODE = "mode";
     static final String EXTRA_SENSOR = "sensor";
 
+    private static final int REC_IDLE = 0;
+    private static final int REC_MASK_IN = 1;
+    private static final int REC_ROTATE = 2;
+    private static final int REC_MASK_OUT = 3;
+
     private GLSurfaceView glView;
     private StereoRenderer renderer;
-    private PlayerHudView hud;
+    private HudView hud;
     private SensorManager sensors;
     private Sensor rotationSensor;
+    private Feedback feedback;
+    private GazeController gaze;
+
+    private final HudView.Frame frame = new HudView.Frame();
 
     private boolean panorama;
     private boolean sensorWanted;
     private boolean sensorActive;
     private String dataSource;
     private String videoName = "?";
+    private String videoFormat = "正在打开…";
 
     private final float[] sensorMatrix = new float[16];
     private final float[] basis = new float[16];
     private final float[] offset = new float[16];
+    private final float[] worldRot = new float[16];
     private final float[] composed = new float[16];
+    private final float[] tmpMatrix = new float[16];
     private final float[] rowOut = new float[9];
 
+    // drag / look offsets (no-sensor emulation and small trim)
     private float yaw;
     private float pitch;
 
-    private long lastStatsMs;
-    private long lastDecoded;
-    private long lastDrawn;
-    private float decodeFps;
-    private float drawnFps;
+    // world-space recenter correction (applied on the left of the camera basis)
+    private float worldYaw;
+    private float worldPitch;
+
+    private long sessionStartMs;
+    private long lastActivityMs;
+    private long lastTickMs;
+    private long prevTickMs;
+    private float prevViewYaw;
+    private float prevViewPitch;
+    private volatile float viewYaw;
+    private volatile float viewPitch;
+    private float angularSpeed;
+    private long wakeFadeStart = -1;
+
+    private boolean playing = true;
+    private boolean subtitleOn;
+    private boolean sensorPrimed;
+    private String statusText = "";
+    private long statusUntil;
+
+    // recenter animation
+    private int recPhase = REC_IDLE;
+    private long recPhaseStart;
+    private long recDurationMs;
+    private float recTotalYaw;
+    private float recTotalPitch;
+    private float recBaseWorldYaw;
+    private float recBaseWorldPitch;
+    private float maskAlpha;
+    private float flashAlpha;
+    private long flashStart;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
 
-    private final Runnable statsTask = new Runnable() {
+    private final Runnable tick = new Runnable() {
         @Override
         public void run() {
-            refreshHud();
-            ui.postDelayed(this, 500);
+            onTick();
+            ui.postDelayed(this, 16);
         }
     };
 
@@ -97,10 +141,9 @@ public class PlayerActivity extends Activity
         sensorActive = sensorWanted && rotationSensor != null;
 
         Matrix.setIdentityM(sensorMatrix, 0);
-        sensorMatrix[0] = 1;
-        sensorMatrix[5] = 1;
-        sensorMatrix[10] = 1;
-        sensorMatrix[15] = 1;
+
+        feedback = new Feedback(this);
+        gaze = new GazeController(this);
 
         glView = new GLSurfaceView(this);
         glView.setEGLContextClientVersion(2);
@@ -108,7 +151,7 @@ public class PlayerActivity extends Activity
         glView.setRenderer(renderer);
         glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
 
-        hud = new PlayerHudView(this);
+        hud = new HudView(this);
         hud.setListener(this);
 
         FrameLayout root = new FrameLayout(this);
@@ -118,29 +161,367 @@ public class PlayerActivity extends Activity
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
 
+        sessionStartMs = SystemClock.elapsedRealtime();
+        lastActivityMs = sessionStartMs;
         updateRotation();
+        sensorPrimed = !sensorActive;
+        if (!sensorActive) {
+            gaze.setAnchor(viewYaw, viewPitch);
+        }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         glView.onResume();
+        renderer.setFreeze(false);
         renderer.restartDecoder();
+        VideoDecoder d = renderer.decoder();
+        if (!playing && d != null) {
+            d.pause();
+        }
         if (sensorActive) {
             sensors.registerListener(this, rotationSensor, SensorManager.SENSOR_DELAY_GAME);
         }
-        ui.post(statsTask);
+        recPhase = REC_IDLE;
+        maskAlpha = 0f;
+        flashAlpha = 0f;
+        lastTickMs = 0;
+        lastActivityMs = SystemClock.elapsedRealtime();
+        sensorPrimed = !sensorActive;
+        if (!sensorActive) {
+            gaze.setAnchor(viewYaw, viewPitch);
+        }
+        ui.post(tick);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        ui.removeCallbacks(statsTask);
+        ui.removeCallbacks(tick);
         if (sensors != null) {
             sensors.unregisterListener(this);
         }
+        renderer.setFreeze(false);
         renderer.stopDecoder();
         glView.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (feedback != null) {
+            feedback.release();
+        }
+    }
+
+    @Override
+    public void onBackPressed() {
+        long now = SystemClock.elapsedRealtime();
+        if (gaze.cancelByKey(now)) {
+            lastActivityMs = now;
+            return;
+        }
+        if (recPhase != REC_IDLE) {
+            finishRecenter(now, true);
+            return;
+        }
+        super.onBackPressed();
+    }
+
+    // ------------------------------------------------------------- tick
+
+    private void onTick() {
+        long now = SystemClock.elapsedRealtime();
+        updateRotation();
+
+        if (lastTickMs == 0) {
+            lastTickMs = now;
+            prevTickMs = now;
+            prevViewYaw = viewYaw;
+            prevViewPitch = viewPitch;
+        }
+        float dt = (now - prevTickMs) / 1000f;
+        if (dt < 0.004f) {
+            dt = 0.004f;
+        }
+        if (dt > 0.08f) {
+            dt = 0.08f;
+        }
+        float dy = GazeController.wrap(viewYaw - prevViewYaw);
+        float dp = viewPitch - prevViewPitch;
+        float inst = (float) Math.sqrt(dy * dy + dp * dp) / dt;
+        angularSpeed = angularSpeed * 0.72f + inst * 0.28f;
+        prevViewYaw = viewYaw;
+        prevViewPitch = viewPitch;
+        prevTickMs = now;
+
+        updateRecenter(now);
+
+        float hudAlpha = computeHudAlpha(now);
+        boolean controlsShown = !playing || hudAlpha >= 0.45f;
+
+        float speedForGaze = recPhase == REC_IDLE ? angularSpeed : 0f;
+        if (sensorPrimed) {
+            gaze.update(now, viewYaw, viewPitch, speedForGaze,
+                    controlsShown, recPhase == REC_IDLE);
+        }
+
+        GazeController.Readout g = gaze.readout();
+        if (g.focus != null) {
+            lastActivityMs = now;
+        }
+
+        if (now > statusUntil) {
+            statusText = "";
+        }
+
+        float wakeAlpha = playing ? Math.max(0f, 1f - hudAlpha) : 0f;
+
+        buildFrame(now, hudAlpha, wakeAlpha);
+        hud.setFrame(frame, now);
+    }
+
+    private float computeHudAlpha(long now) {
+        if (!playing) {
+            return 0.4f;
+        }
+        float base;
+        if (now - sessionStartMs < HudSpec.NEW_VIDEO_ALWAYS_MS || recPhase != REC_IDLE) {
+            base = 1f;
+        } else {
+            long idle = now - lastActivityMs;
+            if (idle <= HudSpec.IDLE_START_MS) {
+                base = 1f;
+            } else if (idle >= HudSpec.IDLE_START_MS + HudSpec.IDLE_FADE_MS) {
+                base = 0f;
+            } else {
+                base = 1f - (idle - HudSpec.IDLE_START_MS)
+                        / (float) HudSpec.IDLE_FADE_MS;
+            }
+        }
+        if (wakeFadeStart >= 0) {
+            long t = now - wakeFadeStart;
+            if (t < 180) {
+                base = t / 180f;
+            }
+        }
+        return base;
+    }
+
+    private void buildFrame(long now, float hudAlpha, float wakeAlpha) {
+        frame.title = stripExtension(videoName);
+        frame.format = videoFormat;
+        frame.subtitle = "";
+        frame.status = statusText;
+        frame.statusUntil = statusUntil;
+        frame.playing = playing;
+        frame.subtitleOn = subtitleOn;
+        VideoDecoder d = renderer.decoder();
+        frame.positionMs = d == null ? 0 : d.positionMs();
+        frame.durationMs = d == null ? 0 : d.durationMs();
+        frame.gaze = gaze.readout();
+        frame.hudAlpha = hudAlpha;
+        frame.wakeAlpha = wakeAlpha;
+        frame.maskAlpha = maskAlpha;
+        frame.flashAlpha = flashAlpha;
+    }
+
+    // ------------------------------------------------------------- gaze callbacks
+
+    @Override
+    public void onGazeFocus(HudSpec.Target target) {
+        feedback.focus();
+        lastActivityMs = SystemClock.elapsedRealtime();
+    }
+
+    @Override
+    public void onGazeCancel(HudSpec.Target target) {
+        feedback.cancel();
+    }
+
+    @Override
+    public void onRecenterReady(HudSpec.Target target) {
+        feedback.ready();
+    }
+
+    @Override
+    public void onWake() {
+        long now = SystemClock.elapsedRealtime();
+        feedback.wake();
+        lastActivityMs = now;
+        wakeFadeStart = now;
+        gaze.setAnchor(viewYaw, viewPitch);
+        gaze.onHudOpened(now);
+    }
+
+    @Override
+    public void onGazeConfirm(HudSpec.Target target) {
+        feedback.confirm();
+        lastActivityMs = SystemClock.elapsedRealtime();
+        switch (target.id) {
+            case PLAY:
+                togglePlay();
+                break;
+            case REWIND:
+                seekBy(-10000L, "快退 10 秒");
+                break;
+            case FORWARD:
+                seekBy(10000L, "快进 10 秒");
+                break;
+            case SUBTITLE:
+                subtitleOn = !subtitleOn;
+                showStatus(subtitleOn ? "字幕已开启 · 暂无字幕轨" : "字幕已关闭");
+                break;
+            case RECENTER:
+                startRecenter();
+                break;
+            case MENU:
+                showStatus("菜单将在 alpha5 开放");
+                break;
+            default:
+                break;
+        }
+    }
+
+    private void togglePlay() {
+        playing = !playing;
+        VideoDecoder d = renderer.decoder();
+        if (d != null) {
+            if (playing) {
+                d.resume();
+            } else {
+                d.pause();
+            }
+        }
+        showStatus(playing ? "继续播放" : "已暂停");
+        lastActivityMs = SystemClock.elapsedRealtime();
+    }
+
+    private void seekBy(long deltaMs, String label) {
+        VideoDecoder d = renderer.decoder();
+        if (d == null) {
+            return;
+        }
+        long target = d.positionMs() + deltaMs;
+        if (target < 0) {
+            target = 0;
+        }
+        if (d.durationMs() > 0 && target > d.durationMs()) {
+            target = d.durationMs();
+        }
+        d.seekTo(target);
+        showStatus(label);
+        lastActivityMs = SystemClock.elapsedRealtime();
+    }
+
+    private void showStatus(String text) {
+        statusText = text;
+        statusUntil = SystemClock.elapsedRealtime() + 1800;
+    }
+
+    // ------------------------------------------------------------- recenter
+
+    private void startRecenter() {
+        if (recPhase != REC_IDLE) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        updateRotation();
+        recBaseWorldYaw = worldYaw;
+        recBaseWorldPitch = worldPitch;
+        recTotalYaw = -viewYaw;
+        recTotalPitch = -viewPitch;
+        float max = Math.max(Math.abs(recTotalYaw), Math.abs(recTotalPitch));
+        recDurationMs = (long) Math.min(300f, Math.max(140f, max / 180f * 1000f + 60f));
+        recPhase = REC_MASK_IN;
+        recPhaseStart = now;
+        maskAlpha = 0f;
+        flashAlpha = 0f;
+        renderer.setFreeze(true);
+        lastActivityMs = now;
+    }
+
+    private void updateRecenter(long now) {
+        switch (recPhase) {
+            case REC_MASK_IN: {
+                float t = (now - recPhaseStart) / 110f;
+                if (t >= 1f) {
+                    maskAlpha = 0.8f;
+                    recPhase = REC_ROTATE;
+                    recPhaseStart = now;
+                } else {
+                    maskAlpha = 0.8f * Math.max(0f, t);
+                }
+                break;
+            }
+            case REC_ROTATE: {
+                maskAlpha = 0.8f;
+                float f = (now - recPhaseStart) / (float) recDurationMs;
+                boolean timeout = now - recPhaseStart > 600;
+                if (f > 1f) {
+                    f = 1f;
+                }
+                float ease = f * f * (3f - 2f * f);
+                float targetYaw = recBaseWorldYaw + recTotalYaw * ease;
+                float targetPitch = recBaseWorldPitch + recTotalPitch * ease;
+                float stepY = clamp(targetYaw - worldYaw, -2.5f, 2.5f);
+                float stepP = clamp(targetPitch - worldPitch, -2.5f, 2.5f);
+                worldYaw += stepY;
+                worldPitch += stepP;
+                updateRotation();
+                boolean done = (f >= 1f && Math.abs(targetYaw - worldYaw) < 0.15f
+                        && Math.abs(targetPitch - worldPitch) < 0.15f) || timeout;
+                if (done) {
+                    worldYaw = targetYaw;
+                    worldPitch = targetPitch;
+                    updateRotation();
+                    maskAlpha = 0.8f;
+                    recPhase = REC_MASK_OUT;
+                    recPhaseStart = now;
+                    flashStart = now;
+                    flashAlpha = 1f;
+                    renderer.setFreeze(false);
+                    feedback.confirm();
+                }
+                break;
+            }
+            case REC_MASK_OUT: {
+                float t = (now - recPhaseStart) / 120f;
+                maskAlpha = 0.8f * Math.max(0f, 1f - t);
+                if (t >= 1f) {
+                    finishRecenter(now, false);
+                }
+                break;
+            }
+            default:
+                break;
+        }
+
+        if (flashAlpha > 0f) {
+            long t = now - flashStart;
+            if (t >= 200) {
+                flashAlpha = 0f;
+            } else {
+                flashAlpha = 1f - t / 200f;
+            }
+        }
+    }
+
+    private void finishRecenter(long now, boolean interrupted) {
+        recPhase = REC_IDLE;
+        maskAlpha = 0f;
+        flashAlpha = 0f;
+        renderer.setFreeze(false);
+        updateRotation();
+        gaze.setAnchor(viewYaw, viewPitch);
+        gaze.onHudOpened(now);
+        lastActivityMs = now;
+        if (interrupted) {
+            showStatus("回中已取消");
+        } else {
+            showStatus("已回中");
+        }
     }
 
     // ------------------------------------------------------------- HUD input
@@ -149,17 +530,13 @@ public class PlayerActivity extends Activity
     public void onLook(float dyawDeg, float dpitchDeg) {
         yaw += dyawDeg;
         pitch = Math.max(-70f, Math.min(70f, pitch + dpitchDeg));
-        if (!sensorActive) {
-            updateRotation();
-        }
+        lastActivityMs = SystemClock.elapsedRealtime();
+        updateRotation();
     }
 
     @Override
-    public void onRecenter() {
-        yaw = 0f;
-        pitch = 0f;
-        updateRotation();
-        Toast.makeText(this, "已回中", Toast.LENGTH_SHORT).show();
+    public void onRecenterTap() {
+        startRecenter();
     }
 
     // ------------------------------------------------------------- sensors
@@ -171,6 +548,10 @@ public class PlayerActivity extends Activity
         }
         SensorManager.getRotationMatrixFromVector(sensorMatrix, event.values);
         updateRotation();
+        if (!sensorPrimed) {
+            sensorPrimed = true;
+            gaze.setAnchor(viewYaw, viewPitch);
+        }
     }
 
     @Override
@@ -179,13 +560,10 @@ public class PlayerActivity extends Activity
 
     private void updateRotation() {
         float[] m = sensorMatrix;
-        // columns of the world<-device rotation: X, Y, Z device axes in world space
         float xx = m[0], xy = m[1], xz = m[2];
         float yx = m[4], yy = m[5], yz = m[6];
         float zx = m[8], zy = m[9], zz = m[10];
 
-        // Camera basis stays a proper rotation (det +1, no mirroring). Without a
-        // sensor the frame is the identity, so the initial view is the panorama centre.
         float[] c0;
         float[] c1;
         float[] c2;
@@ -215,36 +593,52 @@ public class PlayerActivity extends Activity
                 break;
         }
 
-        synchronized (rowOut) {
-            Matrix.setIdentityM(basis, 0);
-            basis[0] = c0[0];
-            basis[1] = c0[1];
-            basis[2] = c0[2];
-            basis[4] = c1[0];
-            basis[5] = c1[1];
-            basis[6] = c1[2];
-            basis[8] = c2[0];
-            basis[9] = c2[1];
-            basis[10] = c2[2];
+        Matrix.setIdentityM(basis, 0);
+        basis[0] = c0[0];
+        basis[1] = c0[1];
+        basis[2] = c0[2];
+        basis[4] = c1[0];
+        basis[5] = c1[1];
+        basis[6] = c1[2];
+        basis[8] = c2[0];
+        basis[9] = c2[1];
+        basis[10] = c2[2];
 
-            Matrix.setIdentityM(offset, 0);
-            Matrix.rotateM(offset, 0, -rollDeg, 0f, 0f, 1f);
-            Matrix.rotateM(offset, 0, pitch, 1f, 0f, 0f);
-            Matrix.rotateM(offset, 0, yaw, 0f, 1f, 0f);
-            Matrix.multiplyMM(composed, 0, basis, 0, offset, 0);
+        // Roll correction first, then the drag, so the drag axes are the user's
+        // screen axes in landscape instead of the phone's portrait axes.
+        Matrix.setIdentityM(offset, 0);
+        Matrix.rotateM(offset, 0, pitch, 1f, 0f, 0f);
+        Matrix.rotateM(offset, 0, yaw, 0f, 1f, 0f);
+        Matrix.rotateM(offset, 0, -rollDeg, 0f, 0f, 1f);
 
-            for (int row = 0; row < 3; row++) {
-                for (int col = 0; col < 3; col++) {
-                    rowOut[row * 3 + col] = composed[col * 4 + row];
-                }
+        Matrix.setIdentityM(worldRot, 0);
+        Matrix.rotateM(worldRot, 0, -worldYaw, 0f, 1f, 0f);
+        Matrix.rotateM(worldRot, 0, worldPitch, 1f, 0f, 0f);
+
+        Matrix.multiplyMM(tmpMatrix, 0, worldRot, 0, basis, 0);
+        Matrix.multiplyMM(composed, 0, tmpMatrix, 0, offset, 0);
+
+        for (int row = 0; row < 3; row++) {
+            for (int col = 0; col < 3; col++) {
+                rowOut[row * 3 + col] = composed[col * 4 + row];
             }
-            if (renderer != null) {
-                renderer.setRotation(new float[]{
-                        rowOut[0], rowOut[1], rowOut[2],
-                        rowOut[3], rowOut[4], rowOut[5],
-                        rowOut[6], rowOut[7], rowOut[8]
-                });
-            }
+        }
+        if (renderer != null) {
+            renderer.setRotation(new float[]{
+                    rowOut[0], rowOut[1], rowOut[2],
+                    rowOut[3], rowOut[4], rowOut[5],
+                    rowOut[6], rowOut[7], rowOut[8]
+            });
+        }
+
+        float fx = -rowOut[2];
+        float fy = -rowOut[5];
+        float fz = -rowOut[8];
+        float len = (float) Math.sqrt(fx * fx + fy * fy + fz * fz);
+        if (len > 1e-4f) {
+            float vp = (float) Math.toDegrees(Math.asin(Math.max(-1f, Math.min(1f, fy / len))));
+            viewYaw = GazeController.wrap((float) Math.toDegrees(Math.atan2(fx, -fz)));
+            viewPitch = vp;
         }
     }
 
@@ -259,14 +653,21 @@ public class PlayerActivity extends Activity
     // ------------------------------------------------------------- decoder callbacks
 
     @Override
-    public void onVideoInfo(VideoDecoder source, String codecName, boolean hardware, String mime) {
-        if (source != renderer.decoder()) {
-            return;
-        }
+    public void onVideoInfo(final VideoDecoder source, final String codecName,
+                            final boolean hardware, final String mime) {
         ui.post(new Runnable() {
             @Override
             public void run() {
-                hud.showPanel();
+                if (source != renderer.decoder()) {
+                    return;
+                }
+                VideoDecoder d = source;
+                String mode = panorama ? "360°" : "SBS";
+                String shortMime = mime == null ? "?" : mime.replace("video/", "").toUpperCase();
+                videoFormat = mode + " · " + d.width + "×" + d.height + " · " + shortMime;
+                if (!hardware) {
+                    videoFormat += " · 软解";
+                }
             }
         });
     }
@@ -287,63 +688,15 @@ public class PlayerActivity extends Activity
                     return;
                 }
                 Toast.makeText(PlayerActivity.this, "解码失败: " + message, Toast.LENGTH_LONG).show();
-                refreshHud();
+                showStatus("解码失败");
             }
         });
     }
 
-    // ------------------------------------------------------------- HUD text
+    // ------------------------------------------------------------- helpers
 
-    private void refreshHud() {
-        VideoDecoder d = renderer.decoder();
-        String codec = d == null ? "n/a" : d.codecName;
-        String hw = d == null ? "?" : (d.hardwareAccelerated ? "YES" : "NO");
-        int w = d == null ? 0 : d.width;
-        int h = d == null ? 0 : d.height;
-        long decoded = d == null ? 0 : d.decodedFrames;
-        long late = d == null ? 0 : d.lateFrames;
-        String err = d == null ? null : d.error;
-        String lens = panorama
-                ? "FOV 90° · k1 -0.20 · k2 0.032 · IPD 0°"
-                : "FOV 85° · k1 -0.26 · k2 0.045 · 屏宽 70°";
-
-        long now = android.os.SystemClock.elapsedRealtime();
-        if (lastStatsMs > 0) {
-            float secs = (now - lastStatsMs) / 1000f;
-            if (secs > 0.2f) {
-                decodeFps = (decoded - lastDecoded) / secs;
-                drawnFps = (renderer.drawnFrames() - lastDrawn) / secs;
-            }
-        }
-        lastStatsMs = now;
-        lastDecoded = decoded;
-        lastDrawn = renderer.drawnFrames();
-
-        String[] lines = new String[]{
-                "GAZELINE · M2 " + (panorama ? "360" : "SBS"),
-                "文件  " + videoName,
-                "解码器 " + codec,
-                "硬解  " + hw,
-                "分辨率 " + (w > 0 ? w + "×" + h : "等待首帧"),
-                "解码帧 " + decoded + " · 迟到 " + late,
-                "GL 帧 " + renderer.drawnFrames(),
-                "帧率   解码/绘制 " + one(decodeFps) + " / " + one(drawnFps) + " fps",
-                "镜头   " + lens,
-                "传感器 " + (sensorActive ? "开" : "关") + " · 拖动转头 · 双击回中"
-        };
-        if (err != null) {
-            lines = new String[]{
-                    "GAZELINE · 解码失败",
-                    err,
-                    "文件 " + videoName,
-                    "解码器 " + codec
-            };
-        }
-        hud.setLines(lines);
-    }
-
-    private static String one(float v) {
-        return String.format("%.1f", v);
+    private static float clamp(float v, float lo, float hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
     }
 
     private static String displayName(String path) {
@@ -358,5 +711,13 @@ public class PlayerActivity extends Activity
             return path;
         }
         return new File(path).getName();
+    }
+
+    private static String stripExtension(String name) {
+        int dot = name.lastIndexOf('.');
+        if (dot > 0 && dot > name.length() - 6) {
+            return name.substring(0, dot);
+        }
+        return name;
     }
 }

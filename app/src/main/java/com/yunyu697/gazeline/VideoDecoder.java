@@ -49,6 +49,11 @@ final class VideoDecoder implements Runnable {
     volatile long lateFrames;
     volatile long loopCount;
     volatile String error;
+    volatile boolean paused;
+    volatile long positionUs;
+    volatile long durationUs;
+    private volatile long seekRequestUs = -1;
+    private volatile boolean resetPace;
 
     VideoDecoder(Context context, String dataSource, Surface surface, Listener listener) {
         this.context = context.getApplicationContext();
@@ -82,6 +87,36 @@ final class VideoDecoder implements Runnable {
         return thread != null && running;
     }
 
+    void pause() {
+        paused = true;
+    }
+
+    void resume() {
+        resetPace = true;
+        paused = false;
+    }
+
+    boolean isPaused() {
+        return paused;
+    }
+
+    /** Seek by wall-clock milliseconds; clamps to the known duration. */
+    void seekTo(long ms) {
+        long us = Math.max(0L, ms) * 1000L;
+        if (durationUs > 0 && us > durationUs) {
+            us = durationUs;
+        }
+        seekRequestUs = us;
+    }
+
+    long positionMs() {
+        return positionUs / 1000L;
+    }
+
+    long durationMs() {
+        return durationUs / 1000L;
+    }
+
     @Override
     public void run() {
         MediaExtractor extractor = new MediaExtractor();
@@ -98,6 +133,7 @@ final class VideoDecoder implements Runnable {
             mimeType = format.getString(MediaFormat.KEY_MIME);
             width = intOf(format, MediaFormat.KEY_WIDTH, 0);
             height = intOf(format, MediaFormat.KEY_HEIGHT, 0);
+            durationUs = longOf(format, MediaFormat.KEY_DURATION, 0L);
             if (width <= 0 || height <= 0) {
                 fail("视频尺寸无效");
                 return;
@@ -123,6 +159,12 @@ final class VideoDecoder implements Runnable {
 
             while (running) {
                 decodePass(codec, extractor);
+                if (!running) {
+                    break;
+                }
+                while (paused && running) {
+                    sleepQuiet(20);
+                }
                 if (!running) {
                     break;
                 }
@@ -177,6 +219,23 @@ final class VideoDecoder implements Runnable {
         long startMs = 0;
 
         while (running && !outputDone) {
+            long seekUs = seekRequestUs;
+            if (seekUs >= 0) {
+                seekRequestUs = -1;
+                extractor.seekTo(seekUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+                codec.flush();
+                positionUs = seekUs;
+                inputDone = false;
+                outputDone = false;
+                firstPts = -1;
+                resetPace = false;
+                Log.i(TAG, "seek " + seekUs / 1000L + "ms");
+                continue;
+            }
+            if (paused) {
+                sleepQuiet(10);
+                continue;
+            }
             if (!inputDone) {
                 int in = codec.dequeueInputBuffer(10000);
                 if (in >= 0) {
@@ -207,8 +266,12 @@ final class VideoDecoder implements Runnable {
                     || out == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {
                 // keep polling
             } else if (out >= 0) {
-                boolean render = info.size != 0;
+                boolean render = info.size != 0 && !paused;
                 if (render) {
+                    if (resetPace) {
+                        resetPace = false;
+                        firstPts = -1;
+                    }
                     if (firstPts < 0) {
                         firstPts = info.presentationTimeUs;
                         startMs = SystemClock.elapsedRealtime();
@@ -219,6 +282,7 @@ final class VideoDecoder implements Runnable {
                 codec.releaseOutputBuffer(out, render);
                 if (render) {
                     decodedFrames++;
+                    positionUs = info.presentationTimeUs;
                 }
                 if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                     outputDone = true;
@@ -245,6 +309,24 @@ final class VideoDecoder implements Runnable {
         error = message;
         Log.e(TAG, "decode error: " + message);
         listener.onDecodeError(this, message);
+    }
+
+    private static void sleepQuiet(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static long longOf(MediaFormat f, String key, long fallback) {
+        try {
+            if (f.containsKey(key)) {
+                return f.getLong(key);
+            }
+        } catch (Throwable ignored) {
+        }
+        return fallback;
     }
 
     // ------------------------------------------------------------- codec choice

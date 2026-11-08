@@ -1,5 +1,6 @@
 # Installed by build.ps1, never committed.
 build/
+.tmp/
 *.apk
 *.idsig
 *.keystore
