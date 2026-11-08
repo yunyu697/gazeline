@@ -34,6 +34,16 @@ public class StageView extends View {
     private boolean hudVisible = true;
     private boolean showGrid = false;
 
+    interface OnOpenVideoListener {
+        void onOpenVideo();
+    }
+
+    private OnOpenVideoListener openVideoListener;
+
+    public void setOnOpenVideoListener(OnOpenVideoListener l) {
+        openVideoListener = l;
+    }
+
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path clipPath = new Path();
@@ -465,6 +475,7 @@ public class StageView extends View {
         y += 22 * dp;
         String[] lines = {
                 "控件行 pitch −18°：字幕 −30° · −10 s −16° · 播放 0° · +10 s +16° · 菜单 +30°",
+                "点播中央播放键 → 选 360 全景 / SBS 3D → 选本地视频（M2 管线）",
                 "回中键 (−37°, −25°) Ø7.5° · L2 1.8 s（1.2 s 充能 + 0.6 s 待发）· 随 HUD 一起显隐",
                 "唤醒条 25°×3° @ −39° · 字幕 @ −33° · 与字幕带、快退键中心距均满足 ≥ 2° 隔离"
         };
@@ -684,6 +695,17 @@ public class StageView extends View {
                 hudVisible = true;
                 invalidate();
                 return true;
+            }
+            if (screen == SCR_HUD && hudVisible) {
+                float dx = x - X(0f);
+                float dy = y - Y(-18f);
+                float radius = 5.5f * ppd;
+                if (dx * dx + dy * dy <= radius * radius) {
+                    if (openVideoListener != null) {
+                        openVideoListener.onOpenVideo();
+                    }
+                    return true;
+                }
             }
             if (zones[0].contains(x, y)) {
                 screen = SCR_HUD;
