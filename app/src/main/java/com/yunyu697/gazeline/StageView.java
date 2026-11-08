@@ -51,6 +51,36 @@ public class StageView extends View {
     private final RectF chrome = new RectF();
     private final RectF[] zones = {new RectF(), new RectF(), new RectF()};
     private final RectF wakeZone = new RectF();
+    private final RectF undoZone = new RectF();
+
+    private String undoPath;
+    private String undoMode;
+    private long undoPositionMs;
+    private long undoUntil;
+
+    interface OnUndoPlayListener {
+        void onUndoPlay(String path, String mode, long positionMs);
+    }
+
+    private OnUndoPlayListener undoListener;
+
+    public void setOnUndoPlayListener(OnUndoPlayListener l) {
+        undoListener = l;
+    }
+
+    /** S4 left the player; offer a 5 s "continue" affordance on the phone side. */
+    public void showUndo(String path, String mode, long positionMs) {
+        undoPath = path;
+        undoMode = mode;
+        undoPositionMs = positionMs;
+        undoUntil = android.os.SystemClock.uptimeMillis() + 5000;
+        invalidate();
+    }
+
+    public void clearUndo() {
+        undoPath = null;
+        invalidate();
+    }
 
     private float W, H, dp, side, ppd, cx, cy;
     private Typeface tfReg, tfMed, tfLight;
@@ -222,6 +252,27 @@ public class StageView extends View {
 
         drawHudChrome(c);
         drawBar(c, new String[]{"HUD 预览", "S5 校准", hudVisible ? "收起 HUD" : "叫回 HUD"}, 0);
+        if (undoPath != null) {
+            drawUndo(c);
+        }
+    }
+
+    private void drawUndo(Canvas c) {
+        float h = 42 * dp;
+        undoZone.set(24 * dp, chrome.top - 12 * dp - h, W - 24 * dp, chrome.top - 12 * dp);
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(0xE60B1018);
+        c.drawRoundRect(undoZone, h * 0.5f, h * 0.5f, p);
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(1.2f * dp);
+        p.setColor(0x99FFB454);
+        c.drawRoundRect(undoZone, h * 0.5f, h * 0.5f, p);
+        p.setStyle(Paint.Style.FILL);
+
+        txt(c, "已退出播放 · 继续播放", undoZone.left + 18 * dp,
+                undoZone.centerY() + 4 * dp, 13 * dp, 0xFFE9EEF9, tfMed, Paint.Align.LEFT);
+        txt(c, "5 s 内可撤销", undoZone.right - 18 * dp,
+                undoZone.centerY() + 4 * dp, 10.5f * dp, 0x99FFB454, tfReg, Paint.Align.RIGHT);
     }
 
     private void drawScene(Canvas c) {
@@ -689,6 +740,16 @@ public class StageView extends View {
             float x = e.getX(), y = e.getY();
             if (screen == SCR_SPLASH) {
                 showHud();
+                return true;
+            }
+            if (screen == SCR_HUD && undoPath != null && undoZone.contains(x, y)) {
+                if (android.os.SystemClock.uptimeMillis() <= undoUntil && undoListener != null) {
+                    String path = undoPath;
+                    String mode = undoMode;
+                    long position = undoPositionMs;
+                    clearUndo();
+                    undoListener.onUndoPlay(path, mode, position);
+                }
                 return true;
             }
             if (!hudVisible && wakeZone.contains(x, y)) {

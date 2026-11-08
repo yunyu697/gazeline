@@ -49,6 +49,15 @@ final class Feedback {
         play(ToneGenerator.TONE_PROP_BEEP, 40);
     }
 
+    /** S4 open/close: a single short tone stands in for the spec's whoosh. */
+    void menuOpen() {
+        play(ToneGenerator.TONE_PROP_BEEP2, 55);
+    }
+
+    void menuClose() {
+        play(ToneGenerator.TONE_PROP_NACK, 45);
+    }
+
     void release() {
         handler.removeCallbacksAndMessages(null);
         if (tone != null) {

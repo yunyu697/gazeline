@@ -1,6 +1,7 @@
 package com.yunyu697.gazeline;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
@@ -34,6 +35,11 @@ public class PlayerActivity extends Activity
     static final String EXTRA_PATH = "path";
     static final String EXTRA_MODE = "mode";
     static final String EXTRA_SENSOR = "sensor";
+    static final String EXTRA_POSITION = "position";
+
+    private static final int OVERLAY_NONE = 0;
+    private static final int OVERLAY_MENU = 1;
+    private static final int OVERLAY_CONFIRM = 2;
 
     private static final int REC_IDLE = 0;
     private static final int REC_MASK_IN = 1;
@@ -47,6 +53,7 @@ public class PlayerActivity extends Activity
     private Sensor rotationSensor;
     private Feedback feedback;
     private GazeController gaze;
+    private GazeController menuGaze;
 
     private final HudView.Frame frame = new HudView.Frame();
 
@@ -90,6 +97,19 @@ public class PlayerActivity extends Activity
     private String statusText = "";
     private long statusUntil;
 
+    // S4 overlay: menu, then the exit confirmation
+    private int overlay = OVERLAY_NONE;
+    private long overlayStart;
+    private float overlayAlpha;
+    private String overlayHint = "";
+    private long overlayHintUntil;
+    private long menuOpenedAt;
+    private long menuLeaveSince;
+    private float playbackRate = 1f;
+    private long startAtMs;
+    private boolean startSeekApplied;
+    private boolean exiting;
+
     // recenter animation
     private int recPhase = REC_IDLE;
     private long recPhaseStart;
@@ -132,6 +152,7 @@ public class PlayerActivity extends Activity
         }
         panorama = "360".equals(getIntent().getStringExtra(EXTRA_MODE));
         sensorWanted = getIntent().getBooleanExtra(EXTRA_SENSOR, true);
+        startAtMs = Math.max(0L, getIntent().getLongExtra(EXTRA_POSITION, 0L));
         videoName = displayName(dataSource);
 
         sensors = (SensorManager) getSystemService(SENSOR_SERVICE);
@@ -144,6 +165,8 @@ public class PlayerActivity extends Activity
 
         feedback = new Feedback(this);
         gaze = new GazeController(this);
+        menuGaze = new GazeController(this);
+        menuGaze.setLayer(HudSpec.MENU_ROWS, null, false);
 
         glView = new GLSurfaceView(this);
         glView.setEGLContextClientVersion(2);
@@ -177,6 +200,9 @@ public class PlayerActivity extends Activity
         renderer.setFreeze(false);
         renderer.restartDecoder();
         VideoDecoder d = renderer.decoder();
+        if (d != null && playbackRate != 1f) {
+            d.setSpeed(playbackRate);
+        }
         if (!playing && d != null) {
             d.pause();
         }
@@ -186,6 +212,10 @@ public class PlayerActivity extends Activity
         recPhase = REC_IDLE;
         maskAlpha = 0f;
         flashAlpha = 0f;
+        overlay = OVERLAY_NONE;
+        overlayAlpha = 0f;
+        overlayHint = "";
+        overlayHintUntil = 0;
         lastTickMs = 0;
         lastActivityMs = SystemClock.elapsedRealtime();
         sensorPrimed = !sensorActive;
@@ -218,6 +248,14 @@ public class PlayerActivity extends Activity
     @Override
     public void onBackPressed() {
         long now = SystemClock.elapsedRealtime();
+        if (overlay == OVERLAY_MENU) {
+            closeOverlay("菜单已关闭");
+            return;
+        }
+        if (overlay == OVERLAY_CONFIRM) {
+            closeOverlay("已取消退出");
+            return;
+        }
         if (gaze.cancelByKey(now)) {
             lastActivityMs = now;
             return;
@@ -262,13 +300,20 @@ public class PlayerActivity extends Activity
         boolean controlsShown = !playing || hudAlpha >= 0.45f;
 
         float speedForGaze = recPhase == REC_IDLE ? angularSpeed : 0f;
-        if (sensorPrimed) {
+        if (overlay != OVERLAY_NONE) {
+            updateOverlay(now, speedForGaze);
+            if (sensorPrimed) {
+                gaze.update(now, viewYaw, viewPitch, speedForGaze, false, false);
+            }
+            hudAlpha = 0f;
+        } else if (sensorPrimed) {
             gaze.update(now, viewYaw, viewPitch, speedForGaze,
                     controlsShown, recPhase == REC_IDLE);
         }
 
         GazeController.Readout g = gaze.readout();
-        if (g.focus != null) {
+        GazeController.Readout mg = menuGaze.readout();
+        if (g.focus != null || (overlay != OVERLAY_NONE && mg.focus != null)) {
             lastActivityMs = now;
         }
 
@@ -309,6 +354,101 @@ public class PlayerActivity extends Activity
         return base;
     }
 
+    private void updateOverlay(long now, float speedForGaze) {
+        overlayAlpha = Math.min(1f, (now - overlayStart) / 120f);
+        if (now > overlayHintUntil) {
+            overlayHint = "";
+        }
+        if (!sensorPrimed) {
+            return;
+        }
+        menuGaze.update(now, viewYaw, viewPitch, speedForGaze, true, true);
+
+        GazeController.Readout mg = menuGaze.readout();
+        boolean counting = mg.focus != null;
+        if (counting) {
+            menuLeaveSince = 0;
+        } else {
+            boolean inside = overlay == OVERLAY_MENU
+                    ? HudSpec.inMenuPanel(mg.relYaw, mg.relPitch)
+                    : HudSpec.inConfirmPanel(mg.relYaw, mg.relPitch);
+            if (inside) {
+                menuLeaveSince = 0;
+            } else if (menuLeaveSince == 0) {
+                menuLeaveSince = now;
+            } else if (now - menuLeaveSince >= HudSpec.MENU_LEAVE_CLOSE_MS) {
+                closeOverlay(overlay == OVERLAY_MENU ? "菜单已关闭" : "已取消退出");
+                return;
+            }
+        }
+        if (overlay == OVERLAY_MENU && now - menuOpenedAt >= HudSpec.MENU_AUTO_CLOSE_MS) {
+            closeOverlay("菜单已关闭");
+        }
+    }
+
+    private void openMenu() {
+        long now = SystemClock.elapsedRealtime();
+        overlay = OVERLAY_MENU;
+        overlayStart = now;
+        overlayAlpha = 0f;
+        overlayHint = "";
+        overlayHintUntil = 0;
+        menuOpenedAt = now;
+        menuLeaveSince = 0;
+        menuGaze.setLayer(HudSpec.MENU_ROWS, null, false);
+        menuGaze.setAnchor(viewYaw, viewPitch);
+        menuGaze.onHudOpened(now);
+        menuGaze.protect(now, HudSpec.MENU_PROTECT_MS);
+        feedback.menuOpen();
+        lastActivityMs = now;
+    }
+
+    private void openConfirm() {
+        long now = SystemClock.elapsedRealtime();
+        overlay = OVERLAY_CONFIRM;
+        overlayStart = now;
+        overlayAlpha = 0f;
+        overlayHint = "";
+        overlayHintUntil = 0;
+        menuLeaveSince = 0;
+        menuGaze.setLayer(HudSpec.CONFIRM_TARGETS, null, false);
+        menuGaze.setAnchor(viewYaw, viewPitch);
+        menuGaze.onHudOpened(now);
+        menuGaze.protect(now, HudSpec.CONFIRM_PROTECT_MS);
+        feedback.ready();
+        lastActivityMs = now;
+    }
+
+    private void closeOverlay(String status) {
+        long now = SystemClock.elapsedRealtime();
+        overlay = OVERLAY_NONE;
+        overlayAlpha = 0f;
+        overlayHint = "";
+        overlayHintUntil = 0;
+        menuLeaveSince = 0;
+        feedback.menuClose();
+        gaze.setAnchor(viewYaw, viewPitch);
+        gaze.onHudOpened(now);
+        lastActivityMs = now;
+        if (status != null && status.length() > 0) {
+            showStatus(status);
+        }
+    }
+
+    private void exitPlayback(VideoDecoder d) {
+        if (exiting) {
+            return;
+        }
+        exiting = true;
+        long position = d == null ? 0L : d.positionMs();
+        Intent out = new Intent();
+        out.putExtra(EXTRA_PATH, dataSource);
+        out.putExtra(EXTRA_MODE, panorama ? "360" : "sbs");
+        out.putExtra(EXTRA_POSITION, position);
+        setResult(RESULT_OK, out);
+        finish();
+    }
+
     private void buildFrame(long now, float hudAlpha, float wakeAlpha) {
         frame.title = stripExtension(videoName);
         frame.format = videoFormat;
@@ -325,6 +465,18 @@ public class PlayerActivity extends Activity
         frame.wakeAlpha = wakeAlpha;
         frame.maskAlpha = maskAlpha;
         frame.flashAlpha = flashAlpha;
+
+        frame.overlay = overlay;
+        frame.overlayAlpha = overlayAlpha;
+        frame.overlayGaze = menuGaze.readout();
+        frame.overlayHint = overlayHint;
+        frame.speed = playbackRate;
+        frame.defaultFocusHint = overlay != OVERLAY_NONE
+                && menuGaze.readout().focus == null
+                && now - overlayStart < HudSpec.MENU_PROTECT_MS;
+        frame.menuWarn = overlay == OVERLAY_MENU
+                && now - menuOpenedAt > HudSpec.MENU_AUTO_CLOSE_MS - HudSpec.MENU_CLOSE_WARN_MS
+                && now - menuOpenedAt < HudSpec.MENU_AUTO_CLOSE_MS;
     }
 
     // ------------------------------------------------------------- gaze callbacks
@@ -377,11 +529,60 @@ public class PlayerActivity extends Activity
                 startRecenter();
                 break;
             case MENU:
-                showStatus("菜单将在 alpha5 开放");
+                openMenu();
+                break;
+            case MENU_SUBTITLE:
+                subtitleOn = !subtitleOn;
+                setOverlayHint(subtitleOn ? "字幕已开启 · 暂无字幕轨" : "字幕已关闭");
+                break;
+            case MENU_AUDIO:
+                setOverlayHint("暂无音轨 · 当前只解码视频轨");
+                break;
+            case MENU_SPEED:
+                cycleSpeed();
+                break;
+            case MENU_EXIT:
+                openConfirm();
+                break;
+            case EXIT_CANCEL:
+                closeOverlay("已取消退出");
+                break;
+            case EXIT_OK:
+                feedback.confirm();
+                exitPlayback(renderer.decoder());
                 break;
             default:
                 break;
         }
+    }
+
+    private void setOverlayHint(String text) {
+        overlayHint = text;
+        overlayHintUntil = SystemClock.elapsedRealtime() + 2200;
+        lastActivityMs = SystemClock.elapsedRealtime();
+    }
+
+    private void cycleSpeed() {
+        float next;
+        if (playbackRate < 0.75f) {
+            next = 0.75f;
+        } else if (playbackRate < 1f) {
+            next = 1f;
+        } else if (playbackRate < 1.25f) {
+            next = 1.25f;
+        } else if (playbackRate < 1.5f) {
+            next = 1.5f;
+        } else if (playbackRate < 2f) {
+            next = 2f;
+        } else {
+            next = 0.5f;
+        }
+        playbackRate = next;
+        VideoDecoder d = renderer.decoder();
+        if (d != null) {
+            d.setSpeed(next);
+        }
+        setOverlayHint("播放速度 " + String.format("%.2f", next).replaceAll("0$", "") + "×");
     }
 
     private void togglePlay() {
@@ -667,6 +868,11 @@ public class PlayerActivity extends Activity
                 videoFormat = mode + " · " + d.width + "×" + d.height + " · " + shortMime;
                 if (!hardware) {
                     videoFormat += " · 软解";
+                }
+                if (!startSeekApplied && startAtMs > 0 && d.durationMs() > 0) {
+                    startSeekApplied = true;
+                    d.seekTo(startAtMs);
+                    showStatus("已回到上次位置");
                 }
             }
         });

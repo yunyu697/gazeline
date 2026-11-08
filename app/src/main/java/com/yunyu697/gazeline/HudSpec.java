@@ -30,6 +30,13 @@ final class HudSpec {
     static final long RECENTER_CHARGE_MS = 1200;
     static final long RECENTER_READY_MS = 600;
 
+    // S4 menu / exit confirmation (§1.5, §2 S4)
+    static final long MENU_PROTECT_MS = 400;
+    static final long MENU_AUTO_CLOSE_MS = 30000;
+    static final long MENU_CLOSE_WARN_MS = 3000;
+    static final long MENU_LEAVE_CLOSE_MS = 1200;
+    static final long CONFIRM_PROTECT_MS = 400;
+
     static final long IDLE_START_MS = 5000;
     static final long IDLE_FADE_MS = 1000;
     static final long NEW_VIDEO_ALWAYS_MS = 15000;
@@ -69,7 +76,13 @@ final class HudSpec {
         SUBTITLE,
         MENU,
         RECENTER,
-        WAKE;
+        WAKE,
+        MENU_SUBTITLE,
+        MENU_AUDIO,
+        MENU_SPEED,
+        MENU_EXIT,
+        EXIT_CANCEL,
+        EXIT_OK;
 
         String label() {
             switch (this) {
@@ -85,6 +98,18 @@ final class HudSpec {
                     return "打开菜单";
                 case RECENTER:
                     return "回中";
+                case MENU_SUBTITLE:
+                    return "字幕";
+                case MENU_AUDIO:
+                    return "音轨";
+                case MENU_SPEED:
+                    return "播放速度";
+                case MENU_EXIT:
+                    return "退出播放";
+                case EXIT_CANCEL:
+                    return "取消";
+                case EXIT_OK:
+                    return "确认退出";
                 case WAKE:
                 default:
                     return "唤回控件";
@@ -123,6 +148,11 @@ final class HudSpec {
         }
 
         Target(Id id, float yaw, float pitch, float barW, float barH, long dwellMs) {
+            this(id, yaw, pitch, barW, barH, dwellMs, false, false);
+        }
+
+        Target(Id id, float yaw, float pitch, float barW, float barH, long dwellMs,
+               boolean arming, boolean ring) {
             this.id = id;
             this.yaw = yaw;
             this.pitch = pitch;
@@ -131,8 +161,8 @@ final class HudSpec {
             this.barH = barH;
             this.levelMs = dwellMs;
             this.bar = true;
-            this.arming = false;
-            this.ring = false;
+            this.arming = arming;
+            this.ring = ring;
             this.readyTwoStage = false;
         }
 
@@ -171,6 +201,52 @@ final class HudSpec {
     static final Target[] ROW = {SUBTITLE, REWIND, PLAY, FORWARD, MENU};
 
     static final Target[] PLAYING_TARGETS = {SUBTITLE, REWIND, PLAY, FORWARD, MENU, RECENTER};
+
+    // S4 rows: 3 settings (L2) + isolated exit (L3). Pitches sum to the 57° panel.
+    static final Target MENU_SUBTITLE_T = new Target(
+            Id.MENU_SUBTITLE, 0f, 14.3f, 52f, 8f, L2_MS, true, true);
+    static final Target MENU_AUDIO_T = new Target(
+            Id.MENU_AUDIO, 0f, 5.1f, 52f, 8f, L2_MS, true, true);
+    static final Target MENU_SPEED_T = new Target(
+            Id.MENU_SPEED, 0f, -4.1f, 52f, 8f, L2_MS, true, true);
+    static final Target MENU_EXIT_T = new Target(
+            Id.MENU_EXIT, 0f, -13.7f, 52f, 9f, L3_MS, true, true);
+
+    static final Target[] MENU_ROWS = {
+            MENU_SUBTITLE_T, MENU_AUDIO_T, MENU_SPEED_T, MENU_EXIT_T
+    };
+
+    // Exit confirmation: default focus is cancel; confirming takes another L2.
+    static final Target EXIT_CANCEL_T = new Target(
+            Id.EXIT_CANCEL, -10.5f, -7f, 17f, 8f, L1_MS, true, true);
+    static final Target EXIT_OK_T = new Target(
+            Id.EXIT_OK, 10.5f, -7f, 17f, 8f, L2_MS, true, true);
+
+    static final Target[] CONFIRM_TARGETS = {EXIT_CANCEL_T, EXIT_OK_T};
+
+    // ------------------------------------------------------------- menu layout
+
+    static final float MENU_W = 56f;
+    static final float MENU_H = 57f;
+    static final float MENU_ROW_W = 52f;
+    static final float MENU_HEADER_PITCH = 25.2f;
+    static final float MENU_DIVIDER_PITCH = 21.8f;
+    static final float MENU_FOOTER1_PITCH = -22.0f;
+    static final float MENU_FOOTER2_PITCH = -25.0f;
+
+    static final float CONFIRM_W = 42f;
+    static final float CONFIRM_H = 30f;
+    static final float CONFIRM_TITLE_PITCH = 9.2f;
+    static final float CONFIRM_BODY_PITCH = 3.4f;
+    static final float CONFIRM_HINT_PITCH = -12.6f;
+
+    static boolean inMenuPanel(float yaw, float pitch) {
+        return Math.abs(yaw) <= MENU_W * 0.5f && Math.abs(pitch) <= MENU_H * 0.5f;
+    }
+
+    static boolean inConfirmPanel(float yaw, float pitch) {
+        return Math.abs(yaw) <= CONFIRM_W * 0.5f && Math.abs(pitch) <= CONFIRM_H * 0.5f;
+    }
 
     // ------------------------------------------------------------- read-only layout
 

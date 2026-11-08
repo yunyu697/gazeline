@@ -54,6 +54,7 @@ final class VideoDecoder implements Runnable {
     volatile long durationUs;
     private volatile long seekRequestUs = -1;
     private volatile boolean resetPace;
+    private volatile float speed = 1f;
 
     VideoDecoder(Context context, String dataSource, Surface surface, Listener listener) {
         this.context = context.getApplicationContext();
@@ -98,6 +99,18 @@ final class VideoDecoder implements Runnable {
 
     boolean isPaused() {
         return paused;
+    }
+
+    /** Playback rate for the S4 speed row; pacing restarts at the current frame. */
+    void setSpeed(float rate) {
+        if (rate < 0.25f) {
+            rate = 0.25f;
+        }
+        if (rate > 4f) {
+            rate = 4f;
+        }
+        speed = rate;
+        resetPace = true;
     }
 
     /** Seek by wall-clock milliseconds; clamps to the known duration. */
@@ -292,7 +305,8 @@ final class VideoDecoder implements Runnable {
     }
 
     private void pace(long ptsUs, long firstPts, long startMs) {
-        long target = startMs + (ptsUs - firstPts) / 1000L;
+        float rate = speed <= 0f ? 1f : speed;
+        long target = startMs + (long) ((ptsUs - firstPts) / 1000L / rate);
         long now = SystemClock.elapsedRealtime();
         if (target > now + 2) {
             try {

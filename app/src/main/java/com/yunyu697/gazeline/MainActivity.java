@@ -14,9 +14,17 @@ import android.view.WindowManager;
 public class MainActivity extends Activity {
 
     private static final int REQ_PICK_VIDEO = 1001;
+    private static final int REQ_PLAY = 1002;
 
     private StageView stage;
     private boolean pendingSbs;
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private final Runnable clearUndo = new Runnable() {
+        @Override
+        public void run() {
+            stage.clearUndo();
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -35,6 +43,13 @@ public class MainActivity extends Activity {
             @Override
             public void onOpenVideo() {
                 askMode();
+            }
+        });
+        stage.setOnUndoPlayListener(new StageView.OnUndoPlayListener() {
+            @Override
+            public void onUndoPlay(String path, String mode, long positionMs) {
+                ui.removeCallbacks(clearUndo);
+                launchPlayer(path, mode, positionMs);
             }
         });
         setContentView(stage);
@@ -73,6 +88,19 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_PLAY) {
+            if (resultCode == RESULT_OK && data != null) {
+                String path = data.getStringExtra(PlayerActivity.EXTRA_PATH);
+                String mode = data.getStringExtra(PlayerActivity.EXTRA_MODE);
+                long position = data.getLongExtra(PlayerActivity.EXTRA_POSITION, 0L);
+                if (path != null && path.length() > 0) {
+                    stage.showUndo(path, mode == null ? "360" : mode, position);
+                    ui.removeCallbacks(clearUndo);
+                    ui.postDelayed(clearUndo, 5000);
+                }
+            }
+            return;
+        }
         if (requestCode != REQ_PICK_VIDEO || resultCode != RESULT_OK || data == null) {
             return;
         }
@@ -84,11 +112,24 @@ public class MainActivity extends Activity {
             getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (Throwable ignored) {
         }
+        launchPlayer(uri.toString(), pendingSbs ? "sbs" : "360", 0L);
+    }
+
+    private void launchPlayer(String path, String mode, long positionMs) {
         Intent play = new Intent(this, PlayerActivity.class);
-        play.putExtra(PlayerActivity.EXTRA_PATH, uri.toString());
-        play.putExtra(PlayerActivity.EXTRA_MODE, pendingSbs ? "sbs" : "360");
+        play.putExtra(PlayerActivity.EXTRA_PATH, path);
+        play.putExtra(PlayerActivity.EXTRA_MODE, mode);
         play.putExtra(PlayerActivity.EXTRA_SENSOR, true);
-        startActivity(play);
+        if (positionMs > 0) {
+            play.putExtra(PlayerActivity.EXTRA_POSITION, positionMs);
+        }
+        startActivityForResult(play, REQ_PLAY);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        ui.removeCallbacks(clearUndo);
     }
 
     @Override

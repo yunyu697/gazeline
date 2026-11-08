@@ -66,8 +66,32 @@ final class GazeController {
 
     private boolean hudVisible = true;
 
+    /** Which target set this controller drives: HUD row, S4 menu or exit dialog. */
+    private HudSpec.Target[] targets = HudSpec.PLAYING_TARGETS;
+    private HudSpec.Target wakeTarget = HudSpec.WAKE;
+    private boolean anchorPull = true;
+    private long protectUntil;
+
     GazeController(Listener listener) {
         this.listener = listener;
+    }
+
+    /**
+     * Re-point the state machine at another layer. The menu and dialog are
+     * anchored to the head direction captured when they open, so their targets
+     * are aimable by turning the head; a purely head-locked panel would put
+     * every row under the centre reticle and make selection impossible.
+     */
+    void setLayer(HudSpec.Target[] targets, HudSpec.Target wakeTarget, boolean anchorPull) {
+        this.targets = targets;
+        this.wakeTarget = wakeTarget;
+        this.anchorPull = anchorPull;
+    }
+
+    /** Menu protection window: no target may be acquired before it expires. */
+    void protect(long now, long ms) {
+        protectUntil = now + ms;
+        clearFocus();
     }
 
     Readout readout() {
@@ -301,10 +325,13 @@ final class GazeController {
     }
 
     private HudSpec.Target nearest(float py, float pp, float ratio, long now) {
+        if (now < protectUntil) {
+            return null;
+        }
         HudSpec.Target best = null;
         float bestDist = Float.MAX_VALUE;
         if (hudVisible) {
-            for (HudSpec.Target t : HudSpec.PLAYING_TARGETS) {
+            for (HudSpec.Target t : targets) {
                 if (t == cooldownTarget && now < cooldownUntil) {
                     continue;
                 }
@@ -320,8 +347,8 @@ final class GazeController {
                     best = t;
                 }
             }
-        } else {
-            HudSpec.Target wake = HudSpec.WAKE;
+        } else if (wakeTarget != null) {
+            HudSpec.Target wake = wakeTarget;
             if (wake.hit(py, pp, ratio) && now >= cooldownUntil && wake != spent) {
                 best = wake;
             }
@@ -330,6 +357,9 @@ final class GazeController {
     }
 
     private void updateAnchor(float viewYaw, float viewPitch, float dtSec, boolean visible) {
+        if (!anchorPull) {
+            return;
+        }
         if (!visible || speedPaused) {
             return;
         }
