@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive icon foreground, 108x108dp canvas.
+  Artwork is scaled to 0.8333 and centred: the 72x48dp visor group becomes
+  60x40dp (plus the 10dp arch above it), i.e. 55.6% of the canvas width.
+  Everything stays inside the central 72dp safe box and the 66dp circle.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <group
+        android:scaleX="0.8333"
+        android:scaleY="0.8333"
+        android:translateX="14"
+        android:translateY="14">
+
+        <!-- arch above the visor -->
+        <path
+            android:pathData="M24,38 V34 A24,16 0 0 1 72,34 V38"
+            android:strokeColor="#67E8F9"
+            android:strokeWidth="3.4"
+            android:strokeAlpha="0.62"
+            android:strokeLineCap="round" />
+
+        <!-- visor body -->
+        <path
+            android:pathData="M24,40 H72 A12,12 0 0 1 84,52 V66 A12,12 0 0 1 72,78 H56 L48,73 L40,78 H24 A12,12 0 0 1 12,66 V52 A12,12 0 0 1 24,40 Z"
+            android:fillColor="#1A67E8F9"
+            android:strokeColor="#67E8F9"
+            android:strokeWidth="3.4"
+            android:strokeLineJoin="round" />
+
+        <!-- play triangle -->
+        <path
+            android:pathData="M40,50 L56,59 L40,68 Z"
+            android:strokeColor="#67E8F9"
+            android:strokeWidth="2.8"
+            android:strokeLineJoin="round">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="40"
+                    android:startY="50"
+                    android:endX="56"
+                    android:endY="68">
+                    <item android:color="#FF67E8F9" android:offset="0.0" />
+                    <item android:color="#FF2563EB" android:offset="1.0" />
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- temple dashes -->
+        <path
+            android:pathData="M19,56 h3 M74,56 h3"
+            android:strokeColor="#67E8F9"
+            android:strokeWidth="2.2"
+            android:strokeAlpha="0.42"
+            android:strokeLineCap="round" />
+    </group>
+</vector>

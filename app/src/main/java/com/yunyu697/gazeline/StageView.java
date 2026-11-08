@@ -117,37 +117,68 @@ public class StageView extends View {
 
     private void drawSplash(Canvas c) {
         p.setShader(new RadialGradient(W / 2f, H * 0.32f, W * 0.95f,
-                new int[]{0x33FFB454, 0x0AFFB454, 0x0005070A}, new float[]{0f, 0.45f, 1f}, Shader.TileMode.CLAMP));
+                new int[]{0x3367E8F9, 0x0A67E8F9, 0x0005070A}, new float[]{0f, 0.45f, 1f}, Shader.TileMode.CLAMP));
         c.drawRect(0, 0, W, H, p);
         p.setShader(null);
 
-        float markR = W * 0.075f;
-        float markY = H * 0.30f;
+        float markW = W * 0.21f;
+        float markH = markW * 0.62f;
+        float markY = H * 0.305f;
+        float l = W / 2f - markW / 2f, r = W / 2f + markW / 2f;
+        float t = markY - markH / 2f, b = markY + markH / 2f;
+        float rr = markH * 0.26f;
+
         p.setStyle(Paint.Style.STROKE);
-        p.setStrokeWidth(1.4f * dp);
-        p.setColor(0x66FFB454);
-        c.drawCircle(W / 2f, markY, markR, p);
+        p.setStrokeWidth(1.6f * dp);
+        p.setColor(0xFF67E8F9);
+
+        RectF arch = new RectF(W / 2f - markW * 0.36f, t - markH * 0.62f,
+                W / 2f + markW * 0.36f, t + markH * 0.18f);
+        c.drawArc(arch, 180, 180, false, p);
+
+        Path visor = new Path();
+        visor.moveTo(l + rr, t);
+        visor.lineTo(r - rr, t);
+        visor.quadTo(r, t, r, t + rr);
+        visor.lineTo(r, b - rr);
+        visor.quadTo(r, b, r - rr, b);
+        visor.lineTo(W / 2f + markW * 0.11f, b);
+        visor.lineTo(W / 2f, b - markH * 0.09f);
+        visor.lineTo(W / 2f - markW * 0.11f, b);
+        visor.lineTo(l + rr, b);
+        visor.quadTo(l, b, l, b - rr);
+        visor.lineTo(l, t + rr);
+        visor.quadTo(l, t, l + rr, t);
+        visor.close();
+        c.drawPath(visor, p);
+
+        float triH = markH * 0.42f;
+        float triW = triH * 0.78f;
+        float triCx = W / 2f - markW * 0.02f;
         p.setStyle(Paint.Style.FILL);
-        p.setColor(AMBER);
+        p.setShader(new LinearGradient(triCx - triW / 2, markY - triH / 2, triCx + triW / 2, markY + triH / 2,
+                0xFF67E8F9, 0xFF2563EB, Shader.TileMode.CLAMP));
         Path tri = new Path();
-        tri.moveTo(W / 2f - markR * 0.30f, markY - markR * 0.42f);
-        tri.lineTo(W / 2f + markR * 0.48f, markY);
-        tri.lineTo(W / 2f - markR * 0.30f, markY + markR * 0.42f);
+        tri.moveTo(triCx - triW / 2, markY - triH / 2);
+        tri.lineTo(triCx + triW / 2, markY);
+        tri.lineTo(triCx - triW / 2, markY + triH / 2);
         tri.close();
         c.drawPath(tri, p);
+        p.setShader(null);
+        p.setStyle(Paint.Style.STROKE);
 
         tp.setLetterSpacing(0.22f);
         txt(c, "GAZELINE", W / 2f, H * 0.445f, W * 0.098f, 0xFFF4F8FF, tfLight, Paint.Align.CENTER);
         tp.setLetterSpacing(0f);
 
-        p.setColor(0x55FFB454);
+        p.setColor(0x5567E8F9);
         c.drawRect(W / 2f - W * 0.10f, H * 0.472f, W / 2f + W * 0.10f, H * 0.472f + 1.2f * dp, p);
 
         tp.setLetterSpacing(0.28f);
         txt(c, "CARDBOARD VR PLAYER", W / 2f, H * 0.515f, W * 0.030f, 0xFF8FA0BA, tfReg, Paint.Align.CENTER);
         tp.setLetterSpacing(0f);
 
-        txt(c, "v1.0 · POC static UI", W / 2f, H - 54 * dp, 11 * dp, 0x55A7B2C7, tfReg, Paint.Align.CENTER);
+        txt(c, "v1.0 · POC", W / 2f, H - 54 * dp, 11 * dp, 0x55A7B2C7, tfReg, Paint.Align.CENTER);
     }
 
     // ---------------------------------------------------------------- HUD

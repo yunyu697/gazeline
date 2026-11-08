@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Simplified 24dp status-bar / notification small icon. Bolder stroke than the
+  launcher monochrome layer because Android renders notification icons at 24dp
+  with no background plate: the visor outline, bottom notch and play triangle
+  must survive at 24px and one-colour tinting.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <path
+        android:pathData="M5,7 H19 A3,3 0 0 1 22,10 V14.5 A3,3 0 0 1 19,17.5 H13.5 L12,16 L10.5,17.5 H5 A3,3 0 0 1 2,14.5 V10 A3,3 0 0 1 5,7 Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineJoin="round" />
+
+    <path
+        android:pathData="M9.2,9.4 L14.6,12 L9.2,14.6 Z"
+        android:fillColor="#FFFFFFFF" />
+</vector>
