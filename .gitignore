@@ -1,0 +1,13 @@
+# Installed by build.ps1, never committed.
+build/
+*.apk
+*.idsig
+*.keystore
+*.jks
+local.properties
+.screenshots/
+.gradle/
+.idea/
+*.log
+Thumbs.db
+.DS_Store
