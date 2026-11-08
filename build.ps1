@@ -28,16 +28,25 @@ if (-not (Test-Path $jar)) {
 $src = Join-Path $proj 'app\src\main'
 $out = Join-Path $proj 'build'
 $resZip = Join-Path $out 'res.zip'
+$dbgResZip = Join-Path $out 'debug-res.zip'
 $gen = Join-Path $out 'gen'
 $keystore = Join-Path $proj 'debug.keystore'
 
 New-Item -ItemType Directory -Force $out, $gen | Out-Null
 if (Test-Path $resZip) { Remove-Item $resZip -Force }
+if (Test-Path $dbgResZip) { Remove-Item $dbgResZip -Force }
 
 Write-Output "== version $version (versionCode $versionCode) =="
 Write-Output '== aapt2 compile =='
 & (Join-Path $bt 'aapt2.exe') compile --dir (Join-Path $src 'res') -o $resZip
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 compile failed' }
+
+# The debug APK uses a different package name, so it installs beside the release
+# APK. Its label must say so, otherwise the launcher shows two identical icons.
+$dbgRes = Join-Path $src '..\debug\res'
+$dbgRes = (Resolve-Path $dbgRes).Path
+& (Join-Path $bt 'aapt2.exe') compile --dir $dbgRes -o $dbgResZip
+if ($LASTEXITCODE -ne 0) { throw 'aapt2 compile (debug overlay) failed' }
 
 function Link-Apk([string]$variant) {
     $base = Join-Path $out "base-$variant.apk"
@@ -55,6 +64,7 @@ function Link-Apk([string]$variant) {
     )
     if ($variant -eq 'debug') {
         $linkArgs += @('--rename-manifest-package', 'com.yunyu697.gazeline.debug')
+        $linkArgs += @('-R', $dbgResZip)
     }
     & (Join-Path $bt 'aapt2.exe') @linkArgs
     if ($LASTEXITCODE -ne 0) { throw "aapt2 link ($variant) failed" }

@@ -223,7 +223,23 @@ public class StageView extends View {
         txt(c, "CARDBOARD VR PLAYER", W / 2f, H * 0.515f, W * 0.030f, 0xFF8FA0BA, tfReg, Paint.Align.CENTER);
         tp.setLetterSpacing(0f);
 
-        txt(c, "v1.0.0", W / 2f, H - 54 * dp, 11 * dp, 0x55A7B2C7, tfReg, Paint.Align.CENTER);
+        txt(c, versionText(), W / 2f, H - 54 * dp, 11 * dp, 0x55A7B2C7, tfReg, Paint.Align.CENTER);
+    }
+
+    private String versionLabel;
+
+    /** Real installed versionName, so the splash can never lie about the build. */
+    private String versionText() {
+        if (versionLabel == null) {
+            String v = "";
+            try {
+                v = getContext().getPackageManager()
+                        .getPackageInfo(getContext().getPackageName(), 0).versionName;
+            } catch (Throwable ignored) {
+            }
+            versionLabel = (v == null || v.length() == 0) ? "" : "v" + v;
+        }
+        return versionLabel;
     }
 
     // ---------------------------------------------------------------- HUD

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug overlay: the debug APK installs beside the release APK (different
+     package name), so its label must differ or the launcher shows two identical
+     entries. Only app_name is overridden here. -->
+<resources>
+    <string name="app_name">Gazeline debug</string>
+</resources>

@@ -76,18 +76,28 @@ powershell -File build.ps1 -Variant release
 
 产物在 `build/`：
 
-- `gazeline-<version>-release.apk`（包名 `com.yunyu697.gazeline`）
-- `gazeline-<version>-debug.apk`（包名 `com.yunyu697.gazeline.debug`）
+- `gazeline-<version>-release.apk`（包名 `com.yunyu697.gazeline`，label「Gazeline」）
+- `gazeline-<version>-debug.apk`（包名 `com.yunyu697.gazeline.debug`，label「Gazeline debug」，仅用于模拟器/本机调试）
 - `SHA256SUMS`
 
-alpha 阶段两个 APK 都用 `debug.keystore` 签名（密码为 Android 调试约定值），因此**不适合上架应用商店**；正式发布前会换成独立 release key。
+debug 变体改过包名，**会与正式版并存**，不会覆盖它；GitHub Release 只上传 release APK，避免装出两个同名图标。alpha 阶段两个 APK 都用 `debug.keystore` 签名（密码为 Android 调试约定值），因此**不适合上架应用商店**；正式发布前会换成独立 release key。
 
 ## 安装
 
 1. 手机允许安装未知来源应用（或开启 USB 调试）。
-2. `adb install -r build/gazeline-<version>-release.apk`，或直接把 APK 传到手机点安装。
-3. 启动后 1.7 s 自动从字标进入 HUD 预览；底部三个按钮切换页面。
-4. 点播放键 → 选 360 / SBS → 系统文件选择器选片，进入播放器。播放器内：有 Rotation Vector 时转头控制视线，没有时拖拽模拟；把控件移到视点中心并停留即可充能，移开或按返回键取消。
+2. 只安装 `gazeline-<version>-release.apk`：`adb install -r build/gazeline-<version>-release.apk`，或直接把 APK 传到手机点安装。
+3. 启动页最下方实时显示已安装的 `versionName`（如 `v1.0.0-alphaN`）；如果显示的不是你要的版本，说明点开的是另一个安装（见下）。
+4. 启动后 1.7 s 自动从字标进入 HUD 预览；底部三个按钮切换页面。
+5. 点琥珀色「打开视频」→ 选 360 / SBS → 系统文件选择器选片，进入播放器。播放器内：有 Rotation Vector 时转头控制视线，没有时拖拽模拟；把控件移到视点中心并停留即可充能，移开或按返回键取消。
+
+### 装完还是旧界面 / 旧图标？
+
+装出两个图标、或升级后仍是旧界面，几乎都是这两个原因：
+
+- 之前装过 `com.yunyu697.gazeline.debug`（旧版 Release 里同时挂了 debug APK）。它包名不同，会作为**第二个应用**安装，图标和名字都跟正式版一样，打开旧图标看到的还是旧版本。到「设置 → 应用」卸载 `Gazeline debug`，只保留 `Gazeline`。
+- 旧安装与当前 APK 签名不同（例如早期用别的密钥自建过），安装器会拒绝覆盖并另装一份。卸载旧版本后再装 release APK。
+
+核对办法：启动页底部的版本号 + `adb shell dumpsys package com.yunyu697.gazeline | findstr versionName`，以及系统「应用信息」里的版本号，三处必须一致。
 
 ## 版本号
 
