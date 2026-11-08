@@ -52,6 +52,7 @@ public class StageView extends View {
     private final RectF[] zones = {new RectF(), new RectF(), new RectF()};
     private final RectF wakeZone = new RectF();
     private final RectF undoZone = new RectF();
+    private final RectF openZone = new RectF();
 
     private String undoPath;
     private String undoMode;
@@ -131,6 +132,10 @@ public class StageView extends View {
             zones[i].set(chrome.left + i * cell, chrome.top, chrome.left + (i + 1) * cell, chrome.bottom);
         }
         wakeZone.set(X(-12.5f), Y(-40.5f), X(12.5f), Y(-37.5f));
+
+        float btnH = 54 * dp;
+        float btnBottom = chrome.top - 16 * dp;
+        openZone.set(24 * dp, btnBottom - btnH, W - 24 * dp, btnBottom);
     }
 
     private float X(float yaw) {
@@ -218,7 +223,7 @@ public class StageView extends View {
         txt(c, "CARDBOARD VR PLAYER", W / 2f, H * 0.515f, W * 0.030f, 0xFF8FA0BA, tfReg, Paint.Align.CENTER);
         tp.setLetterSpacing(0f);
 
-        txt(c, "v1.0 · POC", W / 2f, H - 54 * dp, 11 * dp, 0x55A7B2C7, tfReg, Paint.Align.CENTER);
+        txt(c, "v1.0.0", W / 2f, H - 54 * dp, 11 * dp, 0x55A7B2C7, tfReg, Paint.Align.CENTER);
     }
 
     // ---------------------------------------------------------------- HUD
@@ -248,18 +253,44 @@ public class StageView extends View {
         c.drawRoundRect(eye, 22 * dp, 22 * dp, p);
         p.setStyle(Paint.Style.FILL);
 
-        txt(c, "GAZELINE · POC", eye.left + 14 * dp, eye.top + 22 * dp, 9.5f * dp, 0x66C7D4E8, tfMed, Paint.Align.LEFT);
+        txt(c, "GAZELINE", eye.left + 14 * dp, eye.top + 22 * dp, 9.5f * dp, 0x66C7D4E8, tfMed, Paint.Align.LEFT);
 
         drawHudChrome(c);
+        drawOpenEntry(c);
         drawBar(c, new String[]{"HUD 预览", "S5 校准", hudVisible ? "收起 HUD" : "叫回 HUD"}, 0);
         if (undoPath != null) {
             drawUndo(c);
         }
     }
 
+    private void drawOpenEntry(Canvas c) {
+        txt(c, "上方为静态 HUD 预览 · 真实播放从下方进入", openZone.left + 2 * dp,
+                openZone.top - 12 * dp, 10.2f * dp, 0xFF7A879E, tfReg, Paint.Align.LEFT);
+
+        p.setStyle(Paint.Style.FILL);
+        p.setAlpha(255);
+        p.setShader(new LinearGradient(openZone.left, openZone.top, openZone.right, openZone.bottom,
+                0xFFFFC46B, 0xFFF0A33C, Shader.TileMode.CLAMP));
+        c.drawRoundRect(openZone, openZone.height() / 2f, openZone.height() / 2f, p);
+        p.setShader(null);
+
+        float cy2 = openZone.centerY();
+        float tx = openZone.left + 26 * dp;
+        Path tri = new Path();
+        tri.moveTo(tx, cy2 - 8 * dp);
+        tri.lineTo(tx + 14 * dp, cy2);
+        tri.lineTo(tx, cy2 + 8 * dp);
+        tri.close();
+        p.setColor(0xFF1A1204);
+        c.drawPath(tri, p);
+
+        txt(c, "打开视频", tx + 24 * dp, cy2 + 5.6f * dp, 15.5f * dp, 0xFF1A1204, tfMed, Paint.Align.LEFT);
+        txt(c, "360° / SBS 3D", openZone.right - 20 * dp, cy2 + 4.6f * dp, 12 * dp, 0xCC1A1204, tfReg, Paint.Align.RIGHT);
+    }
+
     private void drawUndo(Canvas c) {
         float h = 42 * dp;
-        undoZone.set(24 * dp, chrome.top - 12 * dp - h, W - 24 * dp, chrome.top - 12 * dp);
+        undoZone.set(24 * dp, openZone.top - 10 * dp - h, W - 24 * dp, openZone.top - 10 * dp);
         p.setStyle(Paint.Style.FILL);
         p.setColor(0xE60B1018);
         c.drawRoundRect(undoZone, h * 0.5f, h * 0.5f, p);
@@ -749,6 +780,12 @@ public class StageView extends View {
                     long position = undoPositionMs;
                     clearUndo();
                     undoListener.onUndoPlay(path, mode, position);
+                }
+                return true;
+            }
+            if (screen == SCR_HUD && openZone.contains(x, y)) {
+                if (openVideoListener != null) {
+                    openVideoListener.onOpenVideo();
                 }
                 return true;
             }
