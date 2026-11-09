@@ -77,12 +77,19 @@ public class PlayerActivity extends Activity
     private String videoFormat = "正在打开…";
 
     private final float[] sensorMatrix = new float[16];
-    private final float[] basis = new float[16];
-    private final float[] offset = new float[16];
-    private final float[] worldRot = new float[16];
-    private final float[] composed = new float[16];
-    private final float[] tmpMatrix = new float[16];
-    private final float[] rowOut = new float[9];
+    private final float[] remapped = new float[16];
+    private final float[] baseRot = new float[9];
+    private final float[] dragRot = new float[9];
+    private final float[] worldMat = new float[9];
+    private final float[] headRot = new float[9];
+    private final float[] mulTmp = new float[9];
+
+    /** sin 45°: an up/down swap needs the phone rolled 45° past vertical. */
+    private static final float UP_FLIP_SIN = 0.70710678f;
+
+    // Screen rotation the camera currently uses; it lags the window rotation so
+    // that a small tilt near the boundary cannot flip the whole view.
+    private int camRotation = -1;
 
     // drag / look offsets (no-sensor emulation and small trim)
     private float yaw;
@@ -1395,89 +1402,178 @@ public class PlayerActivity extends Activity
     public void onAccuracyChanged(Sensor sensor, int accuracy) {
     }
 
+    /**
+     * World←camera = recenter * sensorBasis * drag, all row-major 3x3.
+     *
+     * The sensor matrix is remapped from the device frame to the display frame
+     * first: in landscape the device Y axis is horizontal, so using it as the
+     * camera up made a horizontal head turn roll the picture.  The remapped
+     * frame is then converted from Android's East/North/Up world into the
+     * shader's Y-up world (forward = -Z), which also makes the yaw/pitch read
+     * below meaningful.
+     */
     private void updateRotation() {
-        float[] m = sensorMatrix;
-        float xx = m[0], xy = m[1], xz = m[2];
-        float yx = m[4], yy = m[5], yz = m[6];
-        float zx = m[8], zy = m[9], zz = m[10];
-
-        float[] c0;
-        float[] c1;
-        float[] c2;
-        if (!sensorActive) {
-            c0 = new float[]{1f, 0f, 0f};
-            c1 = new float[]{0f, 1f, 0f};
-            c2 = new float[]{0f, 0f, 1f};
-        } else {
-            c0 = new float[]{xx, xy, xz};
-            c1 = new float[]{yx, yy, yz};
-            c2 = new float[]{zx, zy, zz};
-        }
-
-        float rollDeg;
-        switch (displayRotation()) {
-            case Surface.ROTATION_90:
-                rollDeg = 90f;
-                break;
-            case Surface.ROTATION_180:
-                rollDeg = 180f;
-                break;
-            case Surface.ROTATION_270:
-                rollDeg = -90f;
-                break;
-            default:
-                rollDeg = 0f;
-                break;
-        }
-
-        Matrix.setIdentityM(basis, 0);
-        basis[0] = c0[0];
-        basis[1] = c0[1];
-        basis[2] = c0[2];
-        basis[4] = c1[0];
-        basis[5] = c1[1];
-        basis[6] = c1[2];
-        basis[8] = c2[0];
-        basis[9] = c2[1];
-        basis[10] = c2[2];
-
-        // Roll correction first, then the drag, so the drag axes are the user's
-        // screen axes in landscape instead of the phone's portrait axes.
-        Matrix.setIdentityM(offset, 0);
-        Matrix.rotateM(offset, 0, pitch, 1f, 0f, 0f);
-        Matrix.rotateM(offset, 0, yaw, 0f, 1f, 0f);
-        Matrix.rotateM(offset, 0, -rollDeg, 0f, 0f, 1f);
-
-        Matrix.setIdentityM(worldRot, 0);
-        Matrix.rotateM(worldRot, 0, -worldYaw, 0f, 1f, 0f);
-        Matrix.rotateM(worldRot, 0, worldPitch, 1f, 0f, 0f);
-
-        Matrix.multiplyMM(tmpMatrix, 0, worldRot, 0, basis, 0);
-        Matrix.multiplyMM(composed, 0, tmpMatrix, 0, offset, 0);
-
-        for (int row = 0; row < 3; row++) {
-            for (int col = 0; col < 3; col++) {
-                rowOut[row * 3 + col] = composed[col * 4 + row];
+        int rotation = displayRotation();
+        boolean flipped = false;
+        if (camRotation < 0 || !sensorActive) {
+            camRotation = rotation;
+        } else if (rotation != camRotation) {
+            boolean bothLandscape = isLandscape(camRotation) && isLandscape(rotation);
+            // Portrait<->landscape is a real orientation change and is adopted
+            // at once; 90<->270 (the up/down swap) waits for a 45° tip past
+            // vertical, because a tiny wobble near the boundary used to flip
+            // the view and drop every gaze target onto the reticle.
+            if (!bothLandscape || screenUpComponent(camRotation) < -UP_FLIP_SIN) {
+                camRotation = rotation;
+                flipped = true;
             }
         }
+
+        if (sensorActive) {
+            int axisX;
+            int axisY;
+            switch (camRotation) {
+                case Surface.ROTATION_90:
+                    axisX = SensorManager.AXIS_Y;
+                    axisY = SensorManager.AXIS_MINUS_X;
+                    break;
+                case Surface.ROTATION_180:
+                    axisX = SensorManager.AXIS_MINUS_X;
+                    axisY = SensorManager.AXIS_MINUS_Y;
+                    break;
+                case Surface.ROTATION_270:
+                    axisX = SensorManager.AXIS_MINUS_Y;
+                    axisY = SensorManager.AXIS_X;
+                    break;
+                default:
+                    axisX = SensorManager.AXIS_X;
+                    axisY = SensorManager.AXIS_Y;
+                    break;
+            }
+            SensorManager.remapCoordinateSystem(sensorMatrix, axisX, axisY, remapped);
+            // East/North/Up -> shader X/east, Y/up, Z/south.
+            baseRot[0] = remapped[0];
+            baseRot[1] = remapped[1];
+            baseRot[2] = remapped[2];
+            baseRot[3] = remapped[8];
+            baseRot[4] = remapped[9];
+            baseRot[5] = remapped[10];
+            baseRot[6] = -remapped[4];
+            baseRot[7] = -remapped[5];
+            baseRot[8] = -remapped[6];
+        } else {
+            baseRot[0] = 1f;
+            baseRot[1] = 0f;
+            baseRot[2] = 0f;
+            baseRot[3] = 0f;
+            baseRot[4] = 1f;
+            baseRot[5] = 0f;
+            baseRot[6] = 0f;
+            baseRot[7] = 0f;
+            baseRot[8] = 1f;
+        }
+
+        buildPitchYaw(worldMat, -worldYaw, worldPitch);
+        buildYawPitch(dragRot, yaw, pitch);
+        multiply3(headRot, worldMat, baseRot);
+        multiply3(headRot, headRot, dragRot);
         if (renderer != null) {
             renderer.setRotation(new float[]{
-                    rowOut[0], rowOut[1], rowOut[2],
-                    rowOut[3], rowOut[4], rowOut[5],
-                    rowOut[6], rowOut[7], rowOut[8]
+                    headRot[0], headRot[1], headRot[2],
+                    headRot[3], headRot[4], headRot[5],
+                    headRot[6], headRot[7], headRot[8]
             });
         }
 
-        float fx = -rowOut[2];
-        float fy = -rowOut[5];
-        float fz = -rowOut[8];
+        float fx = -headRot[2];
+        float fy = -headRot[5];
+        float fz = -headRot[8];
         float len = (float) Math.sqrt(fx * fx + fy * fy + fz * fz);
         if (len > 1e-4f) {
             float vp = (float) Math.toDegrees(Math.asin(Math.max(-1f, Math.min(1f, fy / len))));
             viewYaw = GazeController.wrap((float) Math.toDegrees(Math.atan2(fx, -fz)));
             viewPitch = vp;
         }
+
+        if (flipped) {
+            // Re-anchor after the swap so the HUD lands where the head now points.
+            gaze.setAnchor(viewYaw, viewPitch);
+            if (overlay != OVERLAY_NONE) {
+                menuGaze.setAnchor(viewYaw, viewPitch);
+            }
+        }
     }
+
+    private static boolean isLandscape(int rotation) {
+        return rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270;
+    }
+
+    /**
+     * How strongly the screen-up axis of {@code rotation} points at world up
+     * (Android world: Z is up, so the device X axis' up part is m[8]).
+     */
+    private float screenUpComponent(int rotation) {
+        float[] m = sensorMatrix;
+        switch (rotation) {
+            case Surface.ROTATION_90:
+                return -m[8];
+            case Surface.ROTATION_180:
+                return -m[9];
+            case Surface.ROTATION_270:
+                return m[8];
+            default:
+                return m[9];
+        }
+    }
+
+    /** Row-major 3x3: rotate about Y by {@code yawDeg}, then about X by {@code pitchDeg}. */
+    private static void buildYawPitch(float[] out, float yawDeg, float pitchDeg) {
+        float cy = (float) Math.cos(Math.toRadians(yawDeg));
+        float sy = (float) Math.sin(Math.toRadians(yawDeg));
+        float cp = (float) Math.cos(Math.toRadians(pitchDeg));
+        float sp = (float) Math.sin(Math.toRadians(pitchDeg));
+        out[0] = cy;
+        out[1] = sy * sp;
+        out[2] = sy * cp;
+        out[3] = 0f;
+        out[4] = cp;
+        out[5] = -sp;
+        out[6] = -sy;
+        out[7] = cy * sp;
+        out[8] = cy * cp;
+    }
+
+    /** Row-major 3x3: rotate about X by {@code pitchDeg}, then about Y by {@code yawDeg}. */
+    private static void buildPitchYaw(float[] out, float yawDeg, float pitchDeg) {
+        float cy = (float) Math.cos(Math.toRadians(yawDeg));
+        float sy = (float) Math.sin(Math.toRadians(yawDeg));
+        float cp = (float) Math.cos(Math.toRadians(pitchDeg));
+        float sp = (float) Math.sin(Math.toRadians(pitchDeg));
+        out[0] = cy;
+        out[1] = 0f;
+        out[2] = sy;
+        out[3] = sp * sy;
+        out[4] = cp;
+        out[5] = -sp * cy;
+        out[6] = -cp * sy;
+        out[7] = sp;
+        out[8] = cp * cy;
+    }
+
+    /** out = a * b for row-major 3x3; {@code out} may alias {@code a} or {@code b}. */
+    private void multiply3(float[] out, float[] a, float[] b) {
+        float[] r = mulTmp;
+        for (int row = 0; row < 3; row++) {
+            for (int col = 0; col < 3; col++) {
+                r[row * 3 + col] =
+                        a[row * 3] * b[col]
+                                + a[row * 3 + 1] * b[3 + col]
+                                + a[row * 3 + 2] * b[6 + col];
+            }
+        }
+        System.arraycopy(r, 0, out, 0, 9);
+    }
+
 
     private int displayRotation() {
         try {

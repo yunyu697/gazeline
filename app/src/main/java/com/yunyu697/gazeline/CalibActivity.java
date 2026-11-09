@@ -52,11 +52,15 @@ public class CalibActivity extends Activity
     private boolean finishing;
 
     private final float[] sensorMatrix = new float[16];
-    private final float[] basis = new float[16];
-    private final float[] offset = new float[16];
-    private final float[] composed = new float[16];
-    private final float[] rowOut = new float[9];
-    private final float[] basisCols = new float[9];
+    private final float[] remapped = new float[16];
+    private final float[] baseRot = new float[9];
+    private final float[] dragRot = new float[9];
+    private final float[] headRot = new float[9];
+    private final float[] mulTmp = new float[9];
+
+    /** sin 45°: an up/down swap needs the phone rolled 45° past vertical. */
+    private static final float UP_FLIP_SIN = 0.70710678f;
+    private int camRotation = -1;
 
     private float yaw;
     private float pitch;
@@ -440,78 +444,126 @@ public class CalibActivity extends Activity
     public void onAccuracyChanged(Sensor sensor, int accuracy) {
     }
 
+    /**
+     * Same camera basis as the player: remap the sensor matrix into the display
+     * frame, then convert East/North/Up into the Y-up world the view angles use.
+     */
     private void updateRotation() {
-        float[] m = sensorMatrix;
-        if (!sensorActive) {
-            basisCols[0] = 1f;
-            basisCols[1] = 0f;
-            basisCols[2] = 0f;
-            basisCols[3] = 0f;
-            basisCols[4] = 1f;
-            basisCols[5] = 0f;
-            basisCols[6] = 0f;
-            basisCols[7] = 0f;
-            basisCols[8] = 1f;
-        } else {
-            basisCols[0] = m[0];
-            basisCols[1] = m[1];
-            basisCols[2] = m[2];
-            basisCols[3] = m[4];
-            basisCols[4] = m[5];
-            basisCols[5] = m[6];
-            basisCols[6] = m[8];
-            basisCols[7] = m[9];
-            basisCols[8] = m[10];
-        }
-
-        float rollDeg;
-        switch (displayRotation()) {
-            case Surface.ROTATION_90:
-                rollDeg = 90f;
-                break;
-            case Surface.ROTATION_180:
-                rollDeg = 180f;
-                break;
-            case Surface.ROTATION_270:
-                rollDeg = -90f;
-                break;
-            default:
-                rollDeg = 0f;
-                break;
-        }
-
-        Matrix.setIdentityM(basis, 0);
-        basis[0] = basisCols[0];
-        basis[1] = basisCols[1];
-        basis[2] = basisCols[2];
-        basis[4] = basisCols[3];
-        basis[5] = basisCols[4];
-        basis[6] = basisCols[5];
-        basis[8] = basisCols[6];
-        basis[9] = basisCols[7];
-        basis[10] = basisCols[8];
-
-        Matrix.setIdentityM(offset, 0);
-        Matrix.rotateM(offset, 0, pitch, 1f, 0f, 0f);
-        Matrix.rotateM(offset, 0, yaw, 0f, 1f, 0f);
-        Matrix.rotateM(offset, 0, -rollDeg, 0f, 0f, 1f);
-
-        Matrix.multiplyMM(composed, 0, basis, 0, offset, 0);
-        for (int row = 0; row < 3; row++) {
-            for (int col = 0; col < 3; col++) {
-                rowOut[row * 3 + col] = composed[col * 4 + row];
+        int rotation = displayRotation();
+        if (camRotation < 0 || !sensorActive) {
+            camRotation = rotation;
+        } else if (rotation != camRotation) {
+            boolean bothLandscape = isLandscape(camRotation) && isLandscape(rotation);
+            if (!bothLandscape || screenUpComponent(camRotation) < -UP_FLIP_SIN) {
+                camRotation = rotation;
             }
         }
 
-        float fx = -rowOut[2];
-        float fy = -rowOut[5];
-        float fz = -rowOut[8];
+        if (sensorActive) {
+            int axisX;
+            int axisY;
+            switch (camRotation) {
+                case Surface.ROTATION_90:
+                    axisX = SensorManager.AXIS_Y;
+                    axisY = SensorManager.AXIS_MINUS_X;
+                    break;
+                case Surface.ROTATION_180:
+                    axisX = SensorManager.AXIS_MINUS_X;
+                    axisY = SensorManager.AXIS_MINUS_Y;
+                    break;
+                case Surface.ROTATION_270:
+                    axisX = SensorManager.AXIS_MINUS_Y;
+                    axisY = SensorManager.AXIS_X;
+                    break;
+                default:
+                    axisX = SensorManager.AXIS_X;
+                    axisY = SensorManager.AXIS_Y;
+                    break;
+            }
+            SensorManager.remapCoordinateSystem(sensorMatrix, axisX, axisY, remapped);
+            baseRot[0] = remapped[0];
+            baseRot[1] = remapped[1];
+            baseRot[2] = remapped[2];
+            baseRot[3] = remapped[8];
+            baseRot[4] = remapped[9];
+            baseRot[5] = remapped[10];
+            baseRot[6] = -remapped[4];
+            baseRot[7] = -remapped[5];
+            baseRot[8] = -remapped[6];
+        } else {
+            baseRot[0] = 1f;
+            baseRot[1] = 0f;
+            baseRot[2] = 0f;
+            baseRot[3] = 0f;
+            baseRot[4] = 1f;
+            baseRot[5] = 0f;
+            baseRot[6] = 0f;
+            baseRot[7] = 0f;
+            baseRot[8] = 1f;
+        }
+
+        buildYawPitch(dragRot, yaw, pitch);
+        multiply3(headRot, baseRot, dragRot);
+
+        float fx = -headRot[2];
+        float fy = -headRot[5];
+        float fz = -headRot[8];
         float len = (float) Math.sqrt(fx * fx + fy * fy + fz * fz);
         if (len > 1e-4f) {
             float vp = (float) Math.toDegrees(Math.asin(Math.max(-1f, Math.min(1f, fy / len))));
             viewYaw = GazeController.wrap((float) Math.toDegrees(Math.atan2(fx, -fz)));
             viewPitch = vp;
         }
+    }
+
+    private static boolean isLandscape(int rotation) {
+        return rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270;
+    }
+
+    /** How strongly the screen-up axis of {@code rotation} points at world up. */
+    private float screenUpComponent(int rotation) {
+        float[] m = sensorMatrix;
+        switch (rotation) {
+            case Surface.ROTATION_90:
+                return -m[8];
+            case Surface.ROTATION_180:
+                return -m[9];
+            case Surface.ROTATION_270:
+                return m[8];
+            default:
+                return m[9];
+        }
+    }
+
+    /** Row-major 3x3: rotate about Y by {@code yawDeg}, then about X by {@code pitchDeg}. */
+    private static void buildYawPitch(float[] out, float yawDeg, float pitchDeg) {
+        float cy = (float) Math.cos(Math.toRadians(yawDeg));
+        float sy = (float) Math.sin(Math.toRadians(yawDeg));
+        float cp = (float) Math.cos(Math.toRadians(pitchDeg));
+        float sp = (float) Math.sin(Math.toRadians(pitchDeg));
+        out[0] = cy;
+        out[1] = sy * sp;
+        out[2] = sy * cp;
+        out[3] = 0f;
+        out[4] = cp;
+        out[5] = -sp;
+        out[6] = -sy;
+        out[7] = cy * sp;
+        out[8] = cy * cp;
+    }
+
+    /** out = a * b for row-major 3x3; {@code out} may alias {@code a} or {@code b}. */
+    private void multiply3(float[] out, float[] a, float[] b) {
+        float[] r = mulTmp;
+        for (int row = 0; row < 3; row++) {
+            for (int col = 0; col < 3; col++) {
+                r[row * 3 + col] =
+                        a[row * 3] * b[col]
+                                + a[row * 3 + 1] * b[3 + col]
+                                + a[row * 3 + 2] * b[6 + col];
+            }
+        }
+        System.arraycopy(r, 0, out, 0, 9);
     }
 
     private int displayRotation() {
