@@ -16,9 +16,11 @@ public class MainActivity extends Activity {
     private static final int REQ_PICK_VIDEO = 1001;
     private static final int REQ_PLAY = 1002;
     private static final int REQ_CALIB = 1003;
+    private static final int REQ_PICK_SUBTITLE = 1004;
 
     private StageView stage;
     private boolean pendingSbs;
+    private String pendingVideo;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final Runnable clearUndo = new Runnable() {
         @Override
@@ -113,6 +115,23 @@ public class MainActivity extends Activity {
             stage.reloadCalib();
             return;
         }
+        if (requestCode == REQ_PICK_SUBTITLE) {
+            String subtitle = null;
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                Uri subUri = data.getData();
+                try {
+                    getContentResolver().takePersistableUriPermission(subUri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                } catch (Throwable ignored) {
+                }
+                subtitle = subUri.toString();
+            }
+            if (pendingVideo != null) {
+                launchPlayer(pendingVideo, pendingSbs ? "sbs" : "360", 0L, subtitle);
+                pendingVideo = null;
+            }
+            return;
+        }
         if (requestCode != REQ_PICK_VIDEO || resultCode != RESULT_OK || data == null) {
             return;
         }
@@ -124,16 +143,67 @@ public class MainActivity extends Activity {
             getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (Throwable ignored) {
         }
-        launchPlayer(uri.toString(), pendingSbs ? "sbs" : "360", 0L);
+        pendingVideo = uri.toString();
+        askSubtitle();
+    }
+
+    /** Optional, pre-wear step: pick a sidecar subtitle or start without one. */
+    private void askSubtitle() {
+        new AlertDialog.Builder(this)
+                .setTitle("字幕（可选）")
+                .setMessage("选择 .srt / .vtt 字幕文件，或直接开始播放。")
+                .setPositiveButton("选择字幕", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        pickSubtitle();
+                    }
+                })
+                .setNegativeButton("跳过", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        launchPending(null);
+                    }
+                })
+                .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                    @Override
+                    public void onCancel(DialogInterface dialog) {
+                        launchPending(null);
+                    }
+                })
+                .show();
+    }
+
+    private void pickSubtitle() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        startActivityForResult(intent, REQ_PICK_SUBTITLE);
+    }
+
+    private void launchPending(String subtitle) {
+        if (pendingVideo == null) {
+            return;
+        }
+        launchPlayer(pendingVideo, pendingSbs ? "sbs" : "360", 0L, subtitle);
+        pendingVideo = null;
     }
 
     private void launchPlayer(String path, String mode, long positionMs) {
+        launchPlayer(path, mode, positionMs, null);
+    }
+
+    private void launchPlayer(String path, String mode, long positionMs, String subtitle) {
         Intent play = new Intent(this, PlayerActivity.class);
         play.putExtra(PlayerActivity.EXTRA_PATH, path);
         play.putExtra(PlayerActivity.EXTRA_MODE, mode);
         play.putExtra(PlayerActivity.EXTRA_SENSOR, true);
         if (positionMs > 0) {
             play.putExtra(PlayerActivity.EXTRA_POSITION, positionMs);
+        }
+        if (subtitle != null && subtitle.length() > 0) {
+            play.putExtra(PlayerActivity.EXTRA_SUBTITLE, subtitle);
         }
         startActivityForResult(play, REQ_PLAY);
     }

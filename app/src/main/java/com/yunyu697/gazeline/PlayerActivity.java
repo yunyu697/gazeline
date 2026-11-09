@@ -1,6 +1,7 @@
 package com.yunyu697.gazeline;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -36,6 +37,7 @@ public class PlayerActivity extends Activity
     static final String EXTRA_MODE = "mode";
     static final String EXTRA_SENSOR = "sensor";
     static final String EXTRA_POSITION = "position";
+    static final String EXTRA_SUBTITLE = "subtitle";
 
     private static final int OVERLAY_NONE = 0;
     private static final int OVERLAY_MENU = 1;
@@ -93,6 +95,9 @@ public class PlayerActivity extends Activity
 
     private boolean playing = true;
     private boolean subtitleOn;
+    private SubtitleTrack subtitleTrack;
+    private String subtitleSource;
+    private boolean subtitleLoading;
     private boolean sensorPrimed;
     private String statusText = "";
     private long statusUntil;
@@ -154,6 +159,13 @@ public class PlayerActivity extends Activity
         sensorWanted = getIntent().getBooleanExtra(EXTRA_SENSOR, true);
         startAtMs = Math.max(0L, getIntent().getLongExtra(EXTRA_POSITION, 0L));
         videoName = displayName(dataSource);
+        String subtitle = getIntent().getStringExtra(EXTRA_SUBTITLE);
+        if (subtitle == null || subtitle.length() == 0) {
+            subtitle = SubtitleTrack.findSidecar(dataSource);
+        }
+        if (subtitle != null && subtitle.length() > 0) {
+            loadSubtitle(subtitle);
+        }
 
         sensors = (SensorManager) getSystemService(SENSOR_SERVICE);
         if (sensors != null) {
@@ -448,6 +460,16 @@ public class PlayerActivity extends Activity
         finish();
     }
 
+    private String subtitleText() {
+        if (subtitleLoading) {
+            return "字幕加载中…";
+        }
+        if (subtitleTrack == null) {
+            return subtitleSource == null ? "未加载 · 手机端可选" : "字幕文件没有可用条目";
+        }
+        return SubtitleTrack.describe(subtitleSource) + " · " + subtitleTrack.cueCount() + " 条";
+    }
+
     private void buildFrame(long now, float hudAlpha, float wakeAlpha) {
         AudioPlayer audio = renderer.audioPlayer();
         frame.title = stripExtension(videoName);
@@ -456,7 +478,13 @@ public class PlayerActivity extends Activity
             audioSuffix = audio.isMuted() ? " · 静音" : " · 有声";
         }
         frame.format = videoFormat + audioSuffix;
-        frame.subtitle = "";
+        String cue = "";
+        VideoDecoder vd = renderer.decoder();
+        if (subtitleOn && subtitleTrack != null && vd != null) {
+            cue = subtitleTrack.textAt(vd.positionMs());
+        }
+        frame.subtitle = cue;
+        frame.subtitleText = subtitleText();
         frame.status = statusText;
         frame.statusUntil = statusUntil;
         frame.playing = playing;
@@ -536,8 +564,7 @@ public class PlayerActivity extends Activity
                 seekBy(10000L, "快进 10 秒");
                 break;
             case SUBTITLE:
-                subtitleOn = !subtitleOn;
-                showStatus(subtitleOn ? "字幕已开启 · 暂无字幕轨" : "字幕已关闭");
+                toggleSubtitle(false);
                 break;
             case RECENTER:
                 startRecenter();
@@ -546,8 +573,7 @@ public class PlayerActivity extends Activity
                 openMenu();
                 break;
             case MENU_SUBTITLE:
-                subtitleOn = !subtitleOn;
-                setOverlayHint(subtitleOn ? "字幕已开启 · 暂无字幕轨" : "字幕已关闭");
+                toggleSubtitle(true);
                 break;
             case MENU_AUDIO:
                 handleAudioRow();
@@ -567,6 +593,67 @@ public class PlayerActivity extends Activity
                 break;
             default:
                 break;
+        }
+    }
+
+    /** Parses the picked or sidecar subtitle off the UI thread. */
+    private void loadSubtitle(final String source) {
+        subtitleSource = source;
+        subtitleLoading = true;
+        final Context app = getApplicationContext();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                SubtitleTrack track = null;
+                String failure = null;
+                try {
+                    track = SubtitleTrack.load(app, source);
+                } catch (Throwable t) {
+                    failure = t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage();
+                }
+                final SubtitleTrack loaded = track;
+                final String error = failure;
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        subtitleLoading = false;
+                        if (isFinishing() || isDestroyed()) {
+                            return;
+                        }
+                        if (loaded == null) {
+                            showStatus("字幕加载失败：" + error);
+                            return;
+                        }
+                        subtitleTrack = loaded;
+                        if (loaded.cueCount() == 0) {
+                            showStatus("字幕文件没有可用条目");
+                        } else {
+                            subtitleOn = true;
+                            showStatus("字幕已加载 · " + SubtitleTrack.describe(source)
+                                    + " · " + loaded.cueCount() + " 条");
+                        }
+                    }
+                });
+            }
+        }, "gazeline-subtitle").start();
+    }
+
+    /** Subtitle target and menu row share this toggle. */
+    private void toggleSubtitle(boolean inMenu) {
+        String hint;
+        if (subtitleLoading) {
+            subtitleOn = !subtitleOn;
+            hint = subtitleOn ? "字幕已开启 · 正在加载" : "字幕已关闭";
+        } else if (subtitleTrack == null || subtitleTrack.cueCount() == 0) {
+            hint = subtitleSource == null ? "暂无字幕轨" : "字幕文件没有可用条目";
+        } else {
+            subtitleOn = !subtitleOn;
+            hint = subtitleOn ? "字幕已开启" : "字幕已关闭";
+        }
+        if (inMenu) {
+            setOverlayHint(hint);
+        } else {
+            showStatus(hint);
         }
     }
 

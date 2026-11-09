@@ -50,6 +50,7 @@ final class HudView extends View {
         String overlayHint = "";
         String audioValue = "无";
         String audioText = "音轨加载中";
+        String subtitleText = "未加载 · 手机端可选";
         float speed = 1f;
         boolean defaultFocusHint;
         boolean menuWarn;
@@ -149,6 +150,7 @@ final class HudView extends View {
         frame.overlayHint = f.overlayHint;
         frame.audioValue = f.audioValue;
         frame.audioText = f.audioText;
+        frame.subtitleText = f.subtitleText;
         frame.speed = f.speed;
         frame.defaultFocusHint = f.defaultFocusHint;
         frame.menuWarn = f.menuWarn;
@@ -174,6 +176,7 @@ final class HudView extends View {
         sig = sig * 31 + (f.overlayHint == null ? 0 : f.overlayHint.hashCode());
         sig = sig * 31 + (f.audioValue == null ? 0 : f.audioValue.hashCode());
         sig = sig * 31 + (f.audioText == null ? 0 : f.audioText.hashCode());
+        sig = sig * 31 + (f.subtitleText == null ? 0 : f.subtitleText.hashCode());
         sig = sig * 31 + (int) (f.speed * 100);
         sig = sig * 31 + (f.defaultFocusHint ? 1 : 0);
         sig = sig * 31 + (f.menuWarn ? 1 : 0);
@@ -262,9 +265,6 @@ final class HudView extends View {
 
         if (a > 0.01f) {
             drawTopStatus(c, relYaw, relPitch, a);
-            if (frame.subtitleOn && frame.subtitle.length() > 0 && !g.charging) {
-                drawSubtitle(c, relYaw, relPitch, a);
-            }
             drawTimeline(c, relYaw, relPitch, a);
             for (HudSpec.Target t : HudSpec.ROW) {
                 drawTarget(c, t, relYaw, relPitch, g, a);
@@ -272,6 +272,11 @@ final class HudView extends View {
             drawTarget(c, HudSpec.RECENTER, relYaw, relPitch, g, a);
             drawReticle(c, a);
             drawGazeText(c, relYaw, relPitch, g, a);
+        }
+
+        // Subtitles outlive the HUD fade: they are content, not a control.
+        if (frame.subtitleOn && frame.subtitle.length() > 0 && !g.charging) {
+            drawSubtitle(c, relYaw, relPitch, Math.max(0.85f, a));
         }
 
         if (frame.wakeAlpha > 0.01f) {
@@ -378,9 +383,52 @@ final class HudView extends View {
         }
         textPaint.setTypeface(regular);
         textPaint.setTextSize(fontPx(2.1f));
-        tint(textPaint, 0xFFF4F7FF, (int) (alpha * 235));
+        tint(textPaint, 0xFFF4F7FF, (int) (alpha * 240));
         textPaint.setTextAlign(Paint.Align.CENTER);
-        c.drawText(frame.subtitle, eyeCx, sy(pitch), textPaint);
+        float maxWidth = halfW * 1.45f;
+        java.util.List<String> lines = wrapLines(frame.subtitle, maxWidth, 2);
+        float linePitch = 2.4f;
+        float topPitch = pitch + (lines.size() - 1) * linePitch * 0.5f;
+        for (int i = 0; i < lines.size(); i++) {
+            c.drawText(lines.get(i), eyeCx, sy(topPitch - i * linePitch), textPaint);
+        }
+    }
+
+    /** Character-wise wrap that also handles CJK (no spaces); 2 lines max. */
+    private java.util.List<String> wrapLines(String text, float maxWidth, int maxLines) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String raw : text.split("\n")) {
+            String line = raw.trim();
+            while (!line.isEmpty() && out.size() < maxLines) {
+                if (textPaint.measureText(line) <= maxWidth) {
+                    out.add(line);
+                    line = "";
+                    break;
+                }
+                int cut = line.length() - 1;
+                while (cut > 1 && textPaint.measureText(line.substring(0, cut)) > maxWidth) {
+                    cut--;
+                }
+                int space = line.lastIndexOf(' ', cut);
+                if (space > 0) {
+                    cut = space;
+                }
+                out.add(line.substring(0, cut).trim());
+                line = line.substring(cut).trim();
+                if (out.size() == maxLines && !line.isEmpty()) {
+                    String last = out.remove(out.size() - 1);
+                    while (last.length() > 1
+                            && textPaint.measureText(last + "…") > maxWidth) {
+                        last = last.substring(0, last.length() - 1);
+                    }
+                    out.add(last + "…");
+                }
+            }
+            if (out.size() >= maxLines) {
+                break;
+            }
+        }
+        return out;
     }
 
     private void drawTimeline(Canvas c, float relYaw, float relPitch, float alpha) {
@@ -953,7 +1001,7 @@ final class HudView extends View {
     private String secondaryOf(HudSpec.Target t) {
         switch (t.id) {
             case MENU_SUBTITLE:
-                return "暂无字幕轨";
+                return frame.subtitleText == null ? "未加载" : frame.subtitleText;
             case MENU_AUDIO:
                 return frame.audioText == null ? "音轨加载中" : frame.audioText;
             case MENU_SPEED:

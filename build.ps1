@@ -94,8 +94,13 @@ Write-Output '== d8 =='
 $dexDir = Join-Path $out 'dex'
 if (Test-Path $dexDir) { Remove-Item $dexDir -Recurse -Force }
 New-Item -ItemType Directory -Force $dexDir | Out-Null
-$classList = @(Get-ChildItem $classes -Recurse -Filter *.class | ForEach-Object { $_.FullName })
-& (Join-Path $bt 'd8.bat') --release --min-api 26 --lib $jar --output $dexDir @classList
+# D8 takes a class container; passing every .class path overflowed the Windows
+# command line once the app grew past its first handful of classes.
+$classesJar = Join-Path $out 'classes.jar'
+if (Test-Path $classesJar) { Remove-Item $classesJar -Force }
+& jar cf $classesJar -C $classes .
+if ($LASTEXITCODE -ne 0) { throw 'jar failed' }
+& (Join-Path $bt 'd8.bat') --release --min-api 26 --lib $jar --output $dexDir $classesJar
 if ($LASTEXITCODE -ne 0) { throw 'd8 failed' }
 
 Write-Output '== keystore =='
