@@ -36,6 +36,8 @@ final class VideoDecoder implements Runnable {
     private final String dataSource;
     private final Surface surface;
     private final Listener listener;
+    /** Master clock while it has sound; null-safe and may report -1 at any time. */
+    private final AudioPlayer audio;
 
     private volatile boolean running = true;
     private Thread thread;
@@ -56,11 +58,13 @@ final class VideoDecoder implements Runnable {
     private volatile boolean resetPace;
     private volatile float speed = 1f;
 
-    VideoDecoder(Context context, String dataSource, Surface surface, Listener listener) {
+    VideoDecoder(Context context, String dataSource, Surface surface, Listener listener,
+                 AudioPlayer audio) {
         this.context = context.getApplicationContext();
         this.dataSource = dataSource;
         this.surface = surface;
         this.listener = listener;
+        this.audio = audio;
     }
 
     void start() {
@@ -281,15 +285,28 @@ final class VideoDecoder implements Runnable {
             } else if (out >= 0) {
                 boolean render = info.size != 0 && !paused;
                 if (render) {
-                    if (resetPace) {
-                        resetPace = false;
+                    long clockUs = audio == null ? -1L : audio.clockUs();
+                    if (clockUs >= 0) {
+                        // Audio is the master clock; frames wait for their PTS,
+                        // and a large overdue frame only counts as late.
+                        long aheadMs = (info.presentationTimeUs - clockUs) / 1000L;
+                        if (aheadMs > 3) {
+                            sleepQuiet(Math.min(aheadMs, 50));
+                        } else if (aheadMs < -250) {
+                            lateFrames++;
+                        }
                         firstPts = -1;
-                    }
-                    if (firstPts < 0) {
-                        firstPts = info.presentationTimeUs;
-                        startMs = SystemClock.elapsedRealtime();
                     } else {
-                        pace(info.presentationTimeUs, firstPts, startMs);
+                        if (resetPace) {
+                            resetPace = false;
+                            firstPts = -1;
+                        }
+                        if (firstPts < 0) {
+                            firstPts = info.presentationTimeUs;
+                            startMs = SystemClock.elapsedRealtime();
+                        } else {
+                            pace(info.presentationTimeUs, firstPts, startMs);
+                        }
                     }
                 }
                 codec.releaseOutputBuffer(out, render);

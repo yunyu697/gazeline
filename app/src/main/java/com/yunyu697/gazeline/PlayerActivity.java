@@ -30,7 +30,7 @@ import java.io.File;
  */
 public class PlayerActivity extends Activity
         implements HudView.Listener, GazeController.Listener,
-        VideoDecoder.Listener, SensorEventListener {
+        VideoDecoder.Listener, AudioPlayer.Listener, SensorEventListener {
 
     static final String EXTRA_PATH = "path";
     static final String EXTRA_MODE = "mode";
@@ -170,7 +170,7 @@ public class PlayerActivity extends Activity
 
         glView = new GLSurfaceView(this);
         glView.setEGLContextClientVersion(2);
-        renderer = new StereoRenderer(this, dataSource, panorama, this);
+        renderer = new StereoRenderer(this, dataSource, panorama, this, this);
         renderer.setCalib(CalibParams.load(this));
         glView.setRenderer(renderer);
         glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
@@ -201,12 +201,9 @@ public class PlayerActivity extends Activity
         renderer.setFreeze(false);
         renderer.setCalib(CalibParams.load(this));
         renderer.restartDecoder();
-        VideoDecoder d = renderer.decoder();
-        if (d != null && playbackRate != 1f) {
-            d.setSpeed(playbackRate);
-        }
-        if (!playing && d != null) {
-            d.pause();
+        renderer.setSpeed(playbackRate);
+        if (!playing) {
+            renderer.pausePlayback();
         }
         if (sensorActive) {
             sensors.registerListener(this, rotationSensor, SensorManager.SENSOR_DELAY_GAME);
@@ -452,13 +449,28 @@ public class PlayerActivity extends Activity
     }
 
     private void buildFrame(long now, float hudAlpha, float wakeAlpha) {
+        AudioPlayer audio = renderer.audioPlayer();
         frame.title = stripExtension(videoName);
-        frame.format = videoFormat;
+        String audioSuffix = "";
+        if (audio != null && audio.hasTrack()) {
+            audioSuffix = audio.isMuted() ? " · 静音" : " · 有声";
+        }
+        frame.format = videoFormat + audioSuffix;
         frame.subtitle = "";
         frame.status = statusText;
         frame.statusUntil = statusUntil;
         frame.playing = playing;
         frame.subtitleOn = subtitleOn;
+        if (audio == null) {
+            frame.audioValue = "…";
+            frame.audioText = "音轨加载中";
+        } else if (!audio.hasTrack()) {
+            frame.audioValue = "无";
+            frame.audioText = audio.error() != null ? "音轨解码失败" : "该文件没有音频轨道";
+        } else {
+            frame.audioValue = (audio.trackIndex() + 1) + "/" + audio.trackCount();
+            frame.audioText = audio.summary() + (audio.isMuted() ? " · 倍速静音" : " · 有声");
+        }
         VideoDecoder d = renderer.decoder();
         frame.positionMs = d == null ? 0 : d.positionMs();
         frame.durationMs = d == null ? 0 : d.durationMs();
@@ -538,7 +550,7 @@ public class PlayerActivity extends Activity
                 setOverlayHint(subtitleOn ? "字幕已开启 · 暂无字幕轨" : "字幕已关闭");
                 break;
             case MENU_AUDIO:
-                setOverlayHint("暂无音轨 · 当前只解码视频轨");
+                handleAudioRow();
                 break;
             case MENU_SPEED:
                 cycleSpeed();
@@ -564,6 +576,27 @@ public class PlayerActivity extends Activity
         lastActivityMs = SystemClock.elapsedRealtime();
     }
 
+    /** Menu audio row: show the track, or cycle to the next one when present. */
+    private void handleAudioRow() {
+        AudioPlayer audio = renderer.audioPlayer();
+        if (audio == null) {
+            setOverlayHint("音轨加载中…");
+            return;
+        }
+        if (!audio.hasTrack()) {
+            setOverlayHint(audio.error() != null
+                    ? "音轨不可用：" + audio.error()
+                    : "无音轨 · 该文件没有音频轨道");
+            return;
+        }
+        if (audio.trackCount() <= 1) {
+            setOverlayHint(audio.summary() + " · 仅 1 条音轨");
+            return;
+        }
+        renderer.nextAudioTrack();
+        setOverlayHint("正在切换音轨…");
+    }
+
     private void cycleSpeed() {
         float next;
         if (playbackRate < 0.75f) {
@@ -580,22 +613,20 @@ public class PlayerActivity extends Activity
             next = 0.5f;
         }
         playbackRate = next;
-        VideoDecoder d = renderer.decoder();
-        if (d != null) {
-            d.setSpeed(next);
+        renderer.setSpeed(next);
+        String hint = "播放速度 " + String.format("%.2f", next).replaceAll("0$", "") + "×";
+        if (next != 1f) {
+            hint += " · 音频静音（占位）";
         }
-        setOverlayHint("播放速度 " + String.format("%.2f", next).replaceAll("0$", "") + "×");
+        setOverlayHint(hint);
     }
 
     private void togglePlay() {
         playing = !playing;
-        VideoDecoder d = renderer.decoder();
-        if (d != null) {
-            if (playing) {
-                d.resume();
-            } else {
-                d.pause();
-            }
+        if (playing) {
+            renderer.resumePlayback();
+        } else {
+            renderer.pausePlayback();
         }
         showStatus(playing ? "继续播放" : "已暂停");
         lastActivityMs = SystemClock.elapsedRealtime();
@@ -613,7 +644,7 @@ public class PlayerActivity extends Activity
         if (d.durationMs() > 0 && target > d.durationMs()) {
             target = d.durationMs();
         }
-        d.seekTo(target);
+        renderer.seekTo(target);
         showStatus(label);
         lastActivityMs = SystemClock.elapsedRealtime();
     }
@@ -873,7 +904,7 @@ public class PlayerActivity extends Activity
                 }
                 if (!startSeekApplied && startAtMs > 0 && d.durationMs() > 0) {
                     startSeekApplied = true;
-                    d.seekTo(startAtMs);
+                    renderer.seekTo(startAtMs);
                     showStatus("已回到上次位置");
                 }
             }
@@ -882,6 +913,43 @@ public class PlayerActivity extends Activity
 
     @Override
     public void onVideoSize(VideoDecoder source, int width, int height) {
+    }
+
+    @Override
+    public void onAudioInfo(final AudioPlayer source, final int trackCount,
+                            final int trackIndex, final String codecName,
+                            final int sampleRate, final int channelCount) {
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                if (source != renderer.audioPlayer()) {
+                    return;
+                }
+                String text = "音轨 " + (trackIndex + 1) + "/" + trackCount
+                        + " · " + source.summary();
+                if (overlay == OVERLAY_MENU) {
+                    setOverlayHint(text);
+                } else {
+                    showStatus(text);
+                }
+            }
+        });
+    }
+
+    @Override
+    public void onAudioError(final AudioPlayer source, final String message) {
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                if (source != renderer.audioPlayer()) {
+                    return;
+                }
+                showStatus("音轨不可用：" + message);
+            }
+        });
     }
 
     @Override

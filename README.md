@@ -6,7 +6,7 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 
 已知限制：launcher label 是 8 个拉丁字母，默认 4 列图标网格可完整显示；大字体或 5 列网格下可能被省略号截断。不通过缩小字号或改名规避。
 
-> 当前为 alpha 阶段（版本号以 `version.txt` 为准）：本地视频播放、凝视控制与 S5 两段式校准（步进 / 保存 / 回滚）是真实功能；校准参数对画面几何的影响仍待真机实际视频验证。
+> 当前为 alpha 阶段（版本号以 `version.txt` 为准）：本地视频播放、音轨播放、凝视控制与 S5 两段式校准（步进 / 保存 / 回滚）是真实功能；校准参数对画面几何的影响、字幕与 SMB 仍待后续版本或真机验证。
 
 ## 当前完成度
 
@@ -32,6 +32,7 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 | 360 管线 | 独立 `Projection360`：水平 FOV 90°、k1 -0.20、k2 0.032、IPD 0°，等距柱状采样 + 镜头预畸变 |
 | SBS 管线 | 独立 `ProjectionSbs`：垂直 FOV 85°（水平约 90°）、k1 -0.26、k2 0.045、虚拟屏宽 70°，左右半幅各取一半 + 预畸变 |
 | 播放控制 | 播放/暂停、±10 s 跳转（`positionUs` 与时间轴同步）；字幕键切换开关并提示“暂无字幕轨” |
+| 音轨播放（alpha9） | 同一来源的音频轨（第 1 条，可循环切换）→ MediaCodec AAC/其他 → `AudioTrack` 44.1/48 kHz 流式播放；音频播放头作为主时钟，视频按帧 PTS 追音频；暂停/恢复/跳转同时作用于两轨；文件无音轨时静默、不报错，菜单音轨行显示「无」 |
 | 调试 HUD | 文件名 / 格式 / 分辨率 / 进度 / 实际 codec 写在顶部两枚状态卡片，不再单独占用一行 |
 
 **里程碑 2/3 实测（模拟器，2026-11-08/09）**
@@ -47,12 +48,15 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 - S4 菜单（alpha5）：凝视菜单键 1.8 s 打开面板，四行分别为字幕/音轨/倍速/退出；倍速行循环切换并改解码节奏；退出行走 L3 2.5 s 打开二次确认，确认框默认焦点在「取消」，确认项再停留 1.8 s 才退出。
 - 退出链路（alpha5）：确认后回到手机端并带 `position`，5 s 内底部显示「已退出播放 · 继续播放」条；点它从原位置续播（`seek` 到上次进度）。
 - S5 两段式校准（alpha8）：手机端选型号 / 拖 IPD 滑杆 / 记屏幕尺寸，「开始校准」进专用校准页；校准页先做 20 s 可读性自测，再进四组 `−/＋` 微调（瞳距、k1、k2、每眼垂直）。`−/＋` 走 L1 1.2 s，`恢复默认`/`保存并继续` 走 L2 1.8 s，每次执行后 500 ms 冷却；保存写入 SharedPreferences 并回到手机页，返回键回滚到上次保存值。模拟器上实测：k1 由 −0.20 步进到 −0.22、再 −0.24 且测试卡网格即时变化；保存后重启仍为 −0.22；返回键丢弃 −0.24 后重进回到 −0.22。
+- 音轨（alpha9，模拟器）：H.264 1280×720 + 双 AAC 44.1 kHz 立体声轨测试片，日志 `AudioTrack 44100Hz ch=2 enc=2`、`c2.android.aac.decoder`；`dumpsys audio` 显示 `state:started`、`channelMask=0x3, sampleRate=44100`。连续播放约 3.5 分钟，视频与音频各自循环 17 次，循环点相差 15–30 ms（视频先 `seek 0`，音频 `drainTail` 播完尾音后跟到）。带 `--el position 5000` 启动时，视频与音频都执行 `seek 5000ms`。纯视频文件日志为 `source has no audio track, staying silent`，无异常、无 AudioTrack、无错误提示。
+- 音轨切换、倍速静音与暂停/恢复的音频侧：代码路径与视频共用 `renderer.pause/resume/seek/setSpeed`，但模拟器上用拖拽把视点精确停到菜单/暂停键的成功率不稳定，**未实测**（见下）。
 
 **未实现（不要在演示中当成可用功能）：**
 
 - 10-bit HEVC 真机硬解（模拟器已证实不可用，真机待验）
-- 音轨（当前只解码视频轨，无声音）
 - 字幕渲染（字幕键与菜单字幕行只切换状态并提示“暂无字幕轨”）
+- 倍速下的音频变速：0.5–2.0× 时音轨静音（占位）；回到 1.0× 重新对齐视频位置
+- 音轨切换/暂停/恢复的音频侧未在模拟器实测；真机耳机输出与延迟未验
 - SMB 串流、关于页
 - 72 Hz 刷新、长时间耐力测试
 - 校准参数的**画面侧效果**（IPD→SBS 窗口偏移、每眼 Y 偏移）只做到每帧下发 uniform；模拟器无法打开视频源核对，真机待验
@@ -81,7 +85,7 @@ powershell -File build.ps1 -Variant release
 - `gazeline-<version>-debug.apk`（包名 `com.yunyu697.gazeline.debug`，label「Gazeline debug」，仅用于模拟器/本机调试）
 - `SHA256SUMS`
 
-debug 变体改过包名，**会与正式版并存**，不会覆盖它；GitHub Release 只上传 release APK，避免装出两个同名图标。alpha 阶段两个 APK 都用 `debug.keystore` 签名（密码为 Android 调试约定值），因此**不适合上架应用商店**；正式发布前会换成独立 release key。
+debug 变体改过包名，**会与正式版并存**，不会覆盖它；GitHub Release 只上传 release APK，避免装出两个同名图标。debug 变体额外打开 `android:debuggable`（`build.ps1 --debug-mode`），方便把测试片放进应用私有目录做音轨/字幕验证（模拟器上可直接 `adb root` 后 push）；**release 包不可调试**。alpha 阶段两个 APK 都用 `debug.keystore` 签名（密码为 Android 调试约定值），因此**不适合上架应用商店**；正式发布前会换成独立 release key。
 
 ## 安装
 
@@ -140,6 +144,7 @@ app/src/main/java/com/yunyu697/gazeline/
   GazeController.java    凝视状态机：迟滞/去抖/预备/分档/冷却/锚点/分层目标集
   Feedback.java          凝视音效（ToneGenerator）
   VideoDecoder.java      MediaCodec 解码线程：暂停、跳转、循环
+  AudioPlayer.java       音频轨解码 → AudioTrack：AudioTrack 播放头作主时钟、暂停/跳转/循环
   StereoRenderer.java    GL 双视口渲染与画面冻结
   Projection360.java     360° 管线
   ProjectionSbs.java     SBS 管线

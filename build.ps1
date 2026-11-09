@@ -65,6 +65,9 @@ function Link-Apk([string]$variant) {
     if ($variant -eq 'debug') {
         $linkArgs += @('--rename-manifest-package', 'com.yunyu697.gazeline.debug')
         $linkArgs += @('-R', $dbgResZip)
+        # The debug build exists for on-device inspection: make it debuggable so
+        # `adb shell run-as` can place test media in the app's private storage.
+        $linkArgs += @('--debug-mode')
     }
     & (Join-Path $bt 'aapt2.exe') @linkArgs
     if ($LASTEXITCODE -ne 0) { throw "aapt2 link ($variant) failed" }

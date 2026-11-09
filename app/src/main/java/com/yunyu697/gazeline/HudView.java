@@ -48,6 +48,8 @@ final class HudView extends View {
         float overlayAlpha;
         GazeController.Readout overlayGaze;
         String overlayHint = "";
+        String audioValue = "无";
+        String audioText = "音轨加载中";
         float speed = 1f;
         boolean defaultFocusHint;
         boolean menuWarn;
@@ -145,6 +147,8 @@ final class HudView extends View {
         frame.overlayAlpha = f.overlayAlpha;
         frame.overlayGaze = f.overlayGaze;
         frame.overlayHint = f.overlayHint;
+        frame.audioValue = f.audioValue;
+        frame.audioText = f.audioText;
         frame.speed = f.speed;
         frame.defaultFocusHint = f.defaultFocusHint;
         frame.menuWarn = f.menuWarn;
@@ -168,6 +172,8 @@ final class HudView extends View {
         sig = sig * 31 + f.overlay;
         sig = sig * 31 + (int) (f.overlayAlpha * 500);
         sig = sig * 31 + (f.overlayHint == null ? 0 : f.overlayHint.hashCode());
+        sig = sig * 31 + (f.audioValue == null ? 0 : f.audioValue.hashCode());
+        sig = sig * 31 + (f.audioText == null ? 0 : f.audioText.hashCode());
         sig = sig * 31 + (int) (f.speed * 100);
         sig = sig * 31 + (f.defaultFocusHint ? 1 : 0);
         sig = sig * 31 + (f.menuWarn ? 1 : 0);
@@ -935,7 +941,7 @@ final class HudView extends View {
             case MENU_SUBTITLE:
                 return f.subtitleOn ? "开" : "关";
             case MENU_AUDIO:
-                return "无";
+                return f.audioValue == null ? "无" : f.audioValue;
             case MENU_SPEED:
                 return speedText(f.speed);
             case MENU_EXIT:
@@ -949,7 +955,7 @@ final class HudView extends View {
             case MENU_SUBTITLE:
                 return "暂无字幕轨";
             case MENU_AUDIO:
-                return "仅视频轨 · 后续版本";
+                return frame.audioText == null ? "音轨加载中" : frame.audioText;
             case MENU_SPEED:
                 return "循环 0.5–2.0 · 重进恢复 1.0×";
             case MENU_EXIT:
@@ -1019,7 +1025,7 @@ final class HudView extends View {
             case RECENTER:
                 return "视角回中";
             case MENU_AUDIO:
-                return "查看音轨";
+                return "切换音轨";
             case MENU_SPEED:
                 return "切换播放速度";
             case MENU_EXIT:

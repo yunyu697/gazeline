@@ -33,16 +33,21 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
     private final String dataSource;
     private final boolean panorama;
     private final VideoDecoder.Listener decoderListener;
+    private final AudioPlayer.Listener audioListener;
     private final float[] texMatrix = new float[16];
 
     private volatile float[] rot = IDENTITY;
     private volatile boolean freeze;
     private volatile CalibParams calib = CalibParams.defaults();
+    private volatile float speed = 1f;
+    private volatile boolean playing = true;
 
     private int textureId;
     private SurfaceTexture surfaceTexture;
     private Surface surface;
     private VideoDecoder decoder;
+    private AudioPlayer audioPlayer;
+    private int audioTrackIndex;
     private Projection360 p360;
     private ProjectionSbs psbs;
     private FloatBuffer quad;
@@ -61,11 +66,12 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
     private volatile float textureFps;
 
     StereoRenderer(Context context, String dataSource, boolean panorama,
-                   VideoDecoder.Listener decoderListener) {
+                   VideoDecoder.Listener decoderListener, AudioPlayer.Listener audioListener) {
         this.context = context.getApplicationContext();
         this.dataSource = dataSource;
         this.panorama = panorama;
         this.decoderListener = decoderListener;
+        this.audioListener = audioListener;
     }
 
     void setRotation(float[] rowMajor3x3) {
@@ -88,6 +94,89 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
 
     VideoDecoder decoder() {
         return decoder;
+    }
+
+    AudioPlayer audioPlayer() {
+        return audioPlayer;
+    }
+
+    /** Pause both tracks without touching the activity's own state. */
+    void pausePlayback() {
+        playing = false;
+        if (decoder != null) {
+            decoder.pause();
+        }
+        if (audioPlayer != null) {
+            audioPlayer.pause();
+        }
+    }
+
+    void resumePlayback() {
+        playing = true;
+        if (decoder != null) {
+            decoder.resume();
+        }
+        if (audioPlayer != null) {
+            audioPlayer.resume();
+        }
+    }
+
+    /** Seek both tracks; the decoder clamps against the known duration. */
+    void seekTo(long ms) {
+        if (decoder != null) {
+            decoder.seekTo(ms);
+        }
+        if (audioPlayer != null) {
+            audioPlayer.seekTo(ms);
+        }
+    }
+
+    /**
+     * Speed changes are a placeholder for audio: 1.0x has sound, other rates
+     * mute the track. Returning to 1.0x re-seeks the audio to the video clock
+     * so the two do not drift.
+     */
+    void setSpeed(float rate) {
+        speed = rate;
+        if (decoder != null) {
+            decoder.setSpeed(rate);
+        }
+        AudioPlayer audio = audioPlayer;
+        if (audio != null) {
+            boolean wasMuted = audio.isMuted();
+            audio.setSpeed(rate);
+            if (wasMuted && rate >= 0.99f && rate <= 1.01f) {
+                audio.seekTo(decoder == null ? 0L : decoder.positionMs());
+                if (playing) {
+                    audio.resume();
+                } else {
+                    audio.pause();
+                }
+            }
+        }
+    }
+
+    int audioTrackCount() {
+        AudioPlayer audio = audioPlayer;
+        return audio == null ? 0 : audio.trackCount();
+    }
+
+    int audioTrackIndex() {
+        AudioPlayer audio = audioPlayer;
+        return audio == null ? 0 : audio.trackIndex();
+    }
+
+    /** Cycle to the next audio track of the same file, keeping the video position. */
+    void nextAudioTrack() {
+        AudioPlayer audio = audioPlayer;
+        if (audio == null || audio.trackCount() <= 1) {
+            return;
+        }
+        int next = (audio.trackIndex() + 1) % audio.trackCount();
+        long posUs = decoder == null ? 0L : decoder.positionMs() * 1000L;
+        audioTrackIndex = next;
+        stopAudio();
+        startAudio(next, posUs);
     }
 
     long drawnFrames() {
@@ -209,14 +298,39 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
             return;
         }
         stopDecoder();
-        decoder = new VideoDecoder(context, dataSource, surface, decoderListener);
+        startAudio(audioTrackIndex, 0L);
+        decoder = new VideoDecoder(context, dataSource, surface, decoderListener, audioPlayer);
+        decoder.setSpeed(speed);
+        if (!playing) {
+            decoder.pause();
+        }
         decoder.start();
+    }
+
+    private void startAudio(int trackIndex, long startUs) {
+        if (audioListener == null) {
+            return;
+        }
+        audioPlayer = new AudioPlayer(context, dataSource, trackIndex, startUs, audioListener);
+        audioPlayer.setSpeed(speed);
+        if (!playing) {
+            audioPlayer.pause();
+        }
+        audioPlayer.start();
+    }
+
+    private void stopAudio() {
+        if (audioPlayer != null) {
+            audioPlayer.stop();
+            audioPlayer = null;
+        }
     }
 
     void stopDecoder() {
         if (decoder != null) {
             decoder.stop();
         }
+        stopAudio();
     }
 
     void release() {
