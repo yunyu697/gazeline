@@ -32,6 +32,30 @@ $dbgResZip = Join-Path $out 'debug-res.zip'
 $gen = Join-Path $out 'gen'
 $keystore = Join-Path $proj 'debug.keystore'
 
+# Independent release key lives in keystore/ (gitignored). Release builds use it
+# when present; otherwise they fall back to the debug key so plain clones still build.
+$releaseSigning = $null
+$releaseProps = Join-Path $proj 'keystore\keystore.properties'
+if (Test-Path $releaseProps) {
+    $props = @{}
+    foreach ($line in (Get-Content $releaseProps)) {
+        if ($line -match '^\s*([A-Za-z0-9_.]+)\s*=\s*(.+)$') {
+            $props[$matches[1]] = $matches[2].Trim()
+        }
+    }
+    foreach ($name in @('storeFile', 'storePassword', 'keyAlias', 'keyPassword')) {
+        if (-not $props.ContainsKey($name)) { throw "keystore.properties is missing $name" }
+    }
+    $ksFile = Join-Path (Join-Path $proj 'keystore') $props['storeFile']
+    if (-not (Test-Path $ksFile)) { throw "release keystore not found: $ksFile" }
+    $releaseSigning = @{
+        file = $ksFile
+        storePass = $props['storePassword']
+        alias = $props['keyAlias']
+        keyPass = $props['keyPassword']
+    }
+}
+
 New-Item -ItemType Directory -Force $out, $gen | Out-Null
 if (Test-Path $resZip) { Remove-Item $resZip -Force }
 if (Test-Path $dbgResZip) { Remove-Item $dbgResZip -Force }
@@ -149,7 +173,18 @@ foreach ($v in $variants) {
 
     $final = Join-Path $out "gazeline-$version-$v.apk"
     if (Test-Path $final) { Remove-Item $final -Force }
-    & (Join-Path $bt 'apksigner.bat') sign --ks $keystore --ks-pass 'pass:android' --key-pass 'pass:android' --out $final $aligned
+    if ($v -eq 'release' -and $releaseSigning) {
+        $ksArgs = @(
+            '--ks', $releaseSigning.file,
+            '--ks-type', 'PKCS12',
+            '--ks-pass', "pass:$($releaseSigning.storePass)",
+            '--ks-key-alias', $releaseSigning.alias,
+            '--key-pass', "pass:$($releaseSigning.keyPass)"
+        )
+    } else {
+        $ksArgs = @('--ks', $keystore, '--ks-pass', 'pass:android', '--key-pass', 'pass:android')
+    }
+    & (Join-Path $bt 'apksigner.bat') sign @ksArgs --out $final $aligned
     if ($LASTEXITCODE -ne 0) { throw "apksigner sign ($v) failed" }
     & (Join-Path $bt 'apksigner.bat') verify $final
     if ($LASTEXITCODE -ne 0) { throw "apksigner verify ($v) failed" }

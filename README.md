@@ -6,7 +6,7 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 
 已知限制：launcher label 是 8 个拉丁字母，默认 4 列图标网格可完整显示；大字体或 5 列网格下可能被省略号截断。不通过缩小字号或改名规避。SMB 需要 `INTERNET` 权限、手机与电脑同一网段、TCP 445 可达；Windows 侧需开启 SMB2/3 与账号密码（Guest/空会话默认不可用）。
 
-> 当前为 alpha 阶段（版本号以 `version.txt` 为准）：本地视频播放、音轨播放、外挂 SRT/VTT 字幕、SMB2/3 片库（配置与客户端）、凝视控制与 S5 两段式校准（步进 / 保存 / 回滚）、关于页是真实功能；校准参数对画面几何的影响、SMB 的列表/串流（本机无可用账号，未实测）与真机 72 Hz 仍待真机验证。
+> 稳定版已发布（版本号以 `version.txt` 为准）：本地视频播放、音轨播放、外挂 SRT/VTT 字幕、SMB2/3 片库（配置与客户端）、凝视控制与 S5 两段式校准（步进 / 保存 / 回滚）、关于页是真实功能；校准参数对画面几何的影响、SMB 的列表/串流（本机无可用账号，未实测）与真机 72 Hz 仍待真机验证。
 
 ## 当前完成度
 
@@ -58,6 +58,7 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 - 72 Hz（alpha11，模拟器）：`GazelineDisplay: no 72/90Hz mode exposed, keep 60.000004Hz 1080x2400`，启动状态提示「显示 60 Hz · 本机未暴露 72/90 Hz」，视频与字幕照常播放；真机 72/90 Hz 模式的实际切换**未实测**。
 - SMB（alpha12，模拟器）：手机端「片源 → SMB 配置」表单可填写并保存（重开对话框回显 10.0.2.2 / Data1 / test / 密码）；「SMB 片库」对宿主 Windows 的真实 SMB 服务完成了 SMB2/3 协商与 NTLM 认证，返回 `STATUS_LOGON_FAILURE (0xc000006d)`（测试账号无效），说明签名与认证链路可用；手机端「重试 / 配置 / 取消」与播放器内 `smb://` 连接失败的「重试 / 返回」弹窗均已实测。**目录列表、串流播放与带宽未实测**：本机 Guest 关闭、NullSessionShares 为空，缺少有效账号（§4.1.2 的退化档 D2 本地直读仍是当前可演示路径）。
 - 关于页（alpha13，模拟器）：底栏四格全览，`关于` 格点击进入；关于页显示 `GAZELINE` / `CARDBOARD VR PLAYER` / 当前 `versionName`、包名与 `versionCode`、5 个开源组件许可证与隐私说明，卡片高度与文字贴合、无空白；底栏 `返回` 与系统返回键都回到 HUD，`关于` 格保持高亮。
+- 长时耐力（alpha13，模拟器）：`PlayerActivity` 以 `--ez sensor false` 连续循环播放 H.264 1280×720 + 双 AAC 测试片 **60.8 分钟、301 次循环**；末段间隔 10 s 的两帧截图在 6480 个采样点上 **12.7% 像素不同**（画面仍在动），字幕与 SBS 双眼画面正常；解循环间隔 12.04–12.11 s，与开局一致。`dumpsys meminfo`：PSS 2 min 36.9 MB → 8.5 min 44.9 MB → 60.8 min **43.4 MB**（Java 2.9–4.6 MB、Native 15.6–15.8 MB），Views 7 / Activities 1 恒定；`logcat` 无 `FATAL`/`ANR`/OOM。真机的持续发热、降频与耗电**未实测**。
 
 **未实现（不要在演示中当成可用功能）：**
 
@@ -67,7 +68,6 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 - 音轨切换/暂停/恢复的音频侧未在模拟器实测；真机耳机输出与延迟未验
 - SMB 片库的目录列表、串流播放与带宽（客户端已接、无有效账号；凭据以明文存于应用私有 SharedPreferences）；SMB 仅单服务器单共享，无自动发现
 - 72 Hz 真机验证（模拟器只暴露 60 Hz；已在 72/90 Hz 的手机上自动请求，未实测切换结果）
-- 长时间耐力测试
 - 校准参数的**画面侧效果**（IPD→SBS 窗口偏移、每眼 Y 偏移）只做到每帧下发 uniform；模拟器无法打开视频源核对，真机待验
 
 启动页与选片仍靠点屏幕；S5 的「开始校准」也是戴前的一次触摸（这是规格要求：戴前输入、戴后全程凝视）。**进入播放器和校准页后，HUD 全部走凝视**。所有角度按 90° 单眼 FOV 定义，像素值随设备换算。
@@ -95,13 +95,19 @@ powershell -File build.ps1 -Variant release
 - `gazeline-<version>-debug.apk`（包名 `com.yunyu697.gazeline.debug`，label「Gazeline debug」，仅用于模拟器/本机调试）
 - `SHA256SUMS`
 
-debug 变体改过包名，**会与正式版并存**，不会覆盖它；GitHub Release 只上传 release APK，避免装出两个同名图标。debug 变体额外打开 `android:debuggable`（`build.ps1 --debug-mode`），方便把测试片放进应用私有目录做音轨/字幕验证（模拟器上可直接 `adb root` 后 push）；**release 包不可调试**。alpha 阶段两个 APK 都用 `debug.keystore` 签名（密码为 Android 调试约定值），因此**不适合上架应用商店**；正式发布前会换成独立 release key。
+debug 变体改过包名，**会与正式版并存**，不会覆盖它；GitHub Release 只上传 release APK，避免装出两个同名图标。debug 变体额外打开 `android:debuggable`（`build.ps1 --debug-mode`），方便把测试片放进应用私有目录做音轨/字幕验证（模拟器上可直接 `adb root` 后 push）；**release 包不可调试**。
+
+签名：
+
+- release 变体优先用独立发布密钥：`keystore/gazeline-release.jks`（PKCS12，RSA 4096，有效期 10 000 天）+ `keystore/keystore.properties`，两者都在 `.gitignore` 内、不进仓库，需要单独备份；缺失时回落到 `debug.keystore`，保证干净克隆也能构建。
+- debug 变体始终用 `debug.keystore`（密码为 Android 调试约定值），不用于分发。
+- 独立密钥从稳定版起启用；它与 alpha 阶段 debug 签名不同，**升级到稳定版需先卸载 alpha 版**（见下）。
 
 ## 安装
 
 1. 手机允许安装未知来源应用（或开启 USB 调试）。
 2. 只安装 `gazeline-<version>-release.apk`：`adb install -r build/gazeline-<version>-release.apk`，或直接把 APK 传到手机点安装。
-3. 启动页最下方实时显示已安装的 `versionName`（如 `v1.0.0-alphaN`）；如果显示的不是你要的版本，说明点开的是另一个安装（见下）。
+3. 启动页最下方实时显示已安装的 `versionName`（形如 `vMAJOR.MINOR.PATCH-alphaN`）；如果显示的不是你要的版本，说明点开的是另一个安装（见下）。
 4. 启动后 1.7 s 自动从字标进入 HUD 预览；底部四格按钮切换页面：`HUD 预览` / `S5 校准` / `收起·叫回 HUD` / `关于`。
 5. 点琥珀色「打开视频」→ 选片源：本地 360 / 本地 SBS / SMB 片库 / SMB 配置。本地片源接系统文件选择器；SMB 先填服务器、共享、账号密码再浏览片库（选视频后再选 360 / SBS）。随后可选「选择字幕 / 跳过」→ 进入播放器。播放器内：有 Rotation Vector 时转头控制视线，没有时拖拽模拟；把控件移到视点中心并停留即可充能，移开或按返回键取消。
 
@@ -117,10 +123,10 @@ debug 变体改过包名，**会与正式版并存**，不会覆盖它；GitHub 
 ## 版本号
 
 - 唯一权威来源：`version.txt`（构建、打包、校验都从这里读，不手抄）。
-- 形态：`MAJOR.MINOR.PATCH-alphaN`，N 从 1 递增；git tag 为 annotated `v<version>`；GitHub Release 标记 pre-release。
+- 形态：`MAJOR.MINOR.PATCH-alphaN`，N 从 1 递增；git tag 为 annotated `v<version>`；GitHub Release 的 alpha 标 pre-release，稳定版不标。
 - `versionCode` 固定映射：
-  - `1.0.0-alphaN` → `major*1000000 + minor*10000 + patch*100 + N`（例：alpha1 → `1000001`）
-  - 稳定版 `1.0.0` → 同公式，尾段固定 99（保证稳定版永远大于任何 alpha）
+  - `MAJOR.MINOR.PATCH-alphaN` → `major*1000000 + minor*10000 + patch*100 + N`（例：alpha1 → `1000001`）
+  - 稳定版 `MAJOR.MINOR.PATCH` → 同公式，尾段固定 99（保证稳定版永远大于任何 alpha）
 - 自检：
 
 ```powershell

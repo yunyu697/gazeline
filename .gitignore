@@ -5,6 +5,7 @@ build/
 *.idsig
 *.keystore
 *.jks
+keystore/
 local.properties
 .screenshots/
 .gradle/

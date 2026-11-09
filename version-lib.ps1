@@ -1,7 +1,7 @@
 # Single source of truth for the version string is version.txt.
 # versionCode mapping (fixed, must never change after the first public release):
-#   1.0.0-alphaN  -> major*1000000 + minor*10000 + patch*100 + N
-#   1.0.0 (stable) -> major*1000000 + minor*10000 + patch*100 + 99
+#   MAJOR.MINOR.PATCH-alphaN  -> major*1000000 + minor*10000 + patch*100 + N
+#   MAJOR.MINOR.PATCH (stable) -> major*1000000 + minor*10000 + patch*100 + 99
 # alpha N is limited to 1..98 so a stable build always sorts above any alpha.
 # Example: major 1, minor 0, patch 0, alpha 1 -> 1000001
 
