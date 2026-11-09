@@ -40,6 +40,8 @@ final class HudView extends View {
         GazeController.Readout gaze;
         float hudAlpha = 1f;
         float wakeAlpha = 0f;
+        /** 0–1 while the downward glance is being held; drawn at the screen edge. */
+        float wakeProgress = 0f;
         float maskAlpha = 0f;
         float flashAlpha = 0f;
         /** Non-zero while the recenter grace countdown runs (seconds left). */
@@ -59,10 +61,22 @@ final class HudView extends View {
         float overlayAlpha;
         GazeController.Readout overlayGaze;
         String overlayHint = "";
+        /** Rows of the menu page on screen, and which page that is. */
+        HudSpec.Target[] menuTargets = HudSpec.MENU_ROWS_P1;
+        int menuPage;
+        int menuPages = 2;
         String audioValue = "无";
         String audioText = "音轨加载中";
         String subtitleText = "未加载 · 手机端可选";
         float speed = 1f;
+        String brightnessText = "60%";
+        boolean autoBright;
+        String wakeText = "标准";
+        String volumeText = "";
+        String serverText = "";
+        String subStyleText = "";
+        float subtitleScale = 1f;
+        boolean subtitleOutline = true;
         boolean defaultFocusHint;
         boolean menuWarn;
     }
@@ -89,6 +103,7 @@ final class HudView extends View {
     private float eyeCy;
     private float halfW;
     private float ppd;
+    private float pxPerDeg = 10f;
 
     private long lastSignature;
 
@@ -167,10 +182,21 @@ final class HudView extends View {
         frame.overlayAlpha = f.overlayAlpha;
         frame.overlayGaze = f.overlayGaze;
         frame.overlayHint = f.overlayHint;
+        frame.menuTargets = f.menuTargets;
+        frame.menuPage = f.menuPage;
+        frame.menuPages = f.menuPages;
         frame.audioValue = f.audioValue;
         frame.audioText = f.audioText;
         frame.subtitleText = f.subtitleText;
         frame.speed = f.speed;
+        frame.brightnessText = f.brightnessText;
+        frame.autoBright = f.autoBright;
+        frame.wakeText = f.wakeText;
+        frame.volumeText = f.volumeText;
+        frame.serverText = f.serverText;
+        frame.subStyleText = f.subStyleText;
+        frame.subtitleScale = f.subtitleScale;
+        frame.subtitleOutline = f.subtitleOutline;
         frame.defaultFocusHint = f.defaultFocusHint;
         frame.menuWarn = f.menuWarn;
     }
@@ -188,6 +214,7 @@ final class HudView extends View {
         sig = sig * 31 + (f.durationMs / 1000);
         sig = sig * 31 + (int) (f.hudAlpha * 500);
         sig = sig * 31 + (int) (f.wakeAlpha * 500);
+        sig = sig * 31 + (int) (f.wakeProgress * 200);
         sig = sig * 31 + (int) (f.maskAlpha * 500);
         sig = sig * 31 + (int) (f.flashAlpha * 500);
         sig = sig * 31 + (int) (f.recenterCountdown * 10);
@@ -199,6 +226,15 @@ final class HudView extends View {
         sig = sig * 31 + (f.audioText == null ? 0 : f.audioText.hashCode());
         sig = sig * 31 + (f.subtitleText == null ? 0 : f.subtitleText.hashCode());
         sig = sig * 31 + (int) (f.speed * 100);
+        sig = sig * 31 + (f.brightnessText == null ? 0 : f.brightnessText.hashCode());
+        sig = sig * 31 + (f.autoBright ? 1 : 0);
+        sig = sig * 31 + (f.wakeText == null ? 0 : f.wakeText.hashCode());
+        sig = sig * 31 + f.menuPage;
+        sig = sig * 31 + (f.volumeText == null ? 0 : f.volumeText.hashCode());
+        sig = sig * 31 + (f.serverText == null ? 0 : f.serverText.hashCode());
+        sig = sig * 31 + (f.subStyleText == null ? 0 : f.subStyleText.hashCode());
+        sig = sig * 31 + (int) (f.subtitleScale * 100);
+        sig = sig * 31 + (f.subtitleOutline ? 1 : 0);
         sig = sig * 31 + (f.defaultFocusHint ? 1 : 0);
         sig = sig * 31 + (f.menuWarn ? 1 : 0);
         GazeController.Readout mg = f.overlayGaze;
@@ -239,6 +275,7 @@ final class HudView extends View {
             return;
         }
         halfW = w / 4f;
+        pxPerDeg = halfW * 0.017453292f;
 
         if (frame.maskAlpha > 0f) {
             maskPaint.setColor(0xFF04070C);
@@ -308,7 +345,7 @@ final class HudView extends View {
 
         if (frame.wakeAlpha > 0.01f) {
             drawMicroProgress(c, frame.wakeAlpha);
-            drawWakeBar(c, relYaw, relPitch, frame.wakeAlpha);
+            drawWakeHint(c, frame.wakeAlpha);
         }
 
         if (frame.status.length() > 0 && SystemClock.elapsedRealtime() < frame.statusUntil
@@ -319,12 +356,15 @@ final class HudView extends View {
 
     // ------------------------------------------------------------- angle mapping
 
+    // Angles map linearly around the eye. A heads-up layer then keeps the same
+    // size anywhere in the field; the tangent stretch of a flat off-axis panel
+    // was what sheared the control bar when the head turned.
     private float sx(float yawDeg) {
-        return eyeCx + (float) Math.tan(Math.toRadians(yawDeg)) * halfW;
+        return eyeCx + yawDeg * pxPerDeg;
     }
 
     private float sy(float pitchDeg) {
-        return eyeCy - (float) Math.tan(Math.toRadians(pitchDeg)) * halfW;
+        return eyeCy - pitchDeg * pxPerDeg;
     }
 
     private boolean onScreen(float yawDeg, float pitchDeg) {
@@ -337,11 +377,8 @@ final class HudView extends View {
         return out;
     }
 
-    private float angularRadius(float diameterDeg, float yaw, float pitch) {
-        float r = diameterDeg * 0.5f;
-        float rx = halfW * (float) (Math.tan(Math.toRadians(yaw + r)) - Math.tan(Math.toRadians(yaw - r))) * 0.5f;
-        float ry = halfW * (float) (Math.tan(Math.toRadians(pitch + r)) - Math.tan(Math.toRadians(pitch - r))) * 0.5f;
-        return (Math.abs(rx) + Math.abs(ry)) * 0.5f;
+    private float angularRadius(float diameterDeg) {
+        return diameterDeg * 0.5f * pxPerDeg;
     }
 
     private float fontPx(float deg) {
@@ -409,13 +446,24 @@ final class HudView extends View {
             return;
         }
         textPaint.setTypeface(regular);
-        textPaint.setTextSize(fontPx(2.1f));
+        textPaint.setTextSize(fontPx(2.1f * frame.subtitleScale));
         tint(textPaint, 0xFFF4F7FF, (int) (alpha * 240));
         textPaint.setTextAlign(Paint.Align.CENTER);
         float maxWidth = halfW * 1.45f;
         java.util.List<String> lines = wrapLines(frame.subtitle, maxWidth, 2);
-        float linePitch = 2.4f;
+        float linePitch = 2.4f * frame.subtitleScale;
         float topPitch = pitch + (lines.size() - 1) * linePitch * 0.5f;
+        if (frame.subtitleOutline) {
+            strokePaint.setTypeface(regular);
+            strokePaint.setTextSize(textPaint.getTextSize());
+            strokePaint.setStyle(Paint.Style.STROKE);
+            strokePaint.setStrokeWidth(fontPx(0.16f));
+            tint(strokePaint, 0xE6000000, (int) (alpha * 240));
+            strokePaint.setTextAlign(Paint.Align.CENTER);
+            for (int i = 0; i < lines.size(); i++) {
+                c.drawText(lines.get(i), eyeCx, sy(topPitch - i * linePitch), strokePaint);
+            }
+        }
         for (int i = 0; i < lines.size(); i++) {
             c.drawText(lines.get(i), eyeCx, sy(topPitch - i * linePitch), textPaint);
         }
@@ -501,7 +549,7 @@ final class HudView extends View {
         }
         float cx = sx(yaw);
         float cy = sy(pitch);
-        float radius = angularRadius(t.diameterDeg, yaw, pitch);
+        float radius = angularRadius(t.diameterDeg);
 
         boolean focused = g.focus == t;
         boolean cancelling = g.cancelling == t;
@@ -690,7 +738,7 @@ final class HudView extends View {
     private void drawGazeText(Canvas c, float relYaw, float relPitch,
                               GazeController.Readout g, float alpha) {
         HudSpec.Target target = g.focus != null ? g.focus : g.cancelling;
-        if (target == null || target.id == HudSpec.Id.WAKE) {
+        if (target == null) {
             return;
         }
         String action = actionLabel(target);
@@ -822,13 +870,16 @@ final class HudView extends View {
         textPaint.setTextSize(fontPx(1.15f));
         tint(textPaint, HudSpec.C_TEXT3, (int) (alpha * 220));
         textPaint.setTextAlign(Paint.Align.RIGHT);
-        c.drawText("30 s 自动关闭", right, sy(pitch0 + HudSpec.MENU_HEADER_PITCH), textPaint);
+        c.drawText("第 " + (frame.menuPage + 1) + "/" + frame.menuPages + " 页 · 30 s 自动关闭",
+                right, sy(pitch0 + HudSpec.MENU_HEADER_PITCH), textPaint);
 
         tint(fillPaint, 0x1FFFFFFF, (int) (alpha * 255));
         float dy = sy(pitch0 + HudSpec.MENU_DIVIDER_PITCH);
         c.drawRect(left, dy, right, dy + 1f, fillPaint);
 
-        for (HudSpec.Target row : HudSpec.MENU_ROWS) {
+        HudSpec.Target[] rows = frame.menuTargets == null
+                ? HudSpec.MENU_ROWS_P1 : frame.menuTargets;
+        for (HudSpec.Target row : rows) {
             drawMenuRow(c, row, g, alpha);
         }
 
@@ -843,7 +894,9 @@ final class HudView extends View {
         } else {
             tint(textPaint, HudSpec.C_TEXT3, (int) (alpha * 220));
             textPaint.setTextAlign(Paint.Align.LEFT);
-            c.drawText("视线移出面板 1.2 s 关闭", left, fy1, textPaint);
+            c.drawText(frame.menuPage == 0
+                            ? "注视图末「更多设置」翻页" : "注视图末「返回」回上一页",
+                    left, fy1, textPaint);
         }
         if (frame.menuWarn) {
             tint(textPaint, HudSpec.C_AMBER, (int) (alpha * 240));
@@ -852,7 +905,8 @@ final class HudView extends View {
         } else {
             tint(textPaint, HudSpec.C_TEXT3, (int) (alpha * 200));
             textPaint.setTextAlign(Paint.Align.RIGHT);
-            c.drawText("退出需二次确认", right, fy2, textPaint);
+            c.drawText(frame.menuPage == 0
+                    ? "视线移出面板 1.2 s 关闭" : "退出需二次确认", right, fy2, textPaint);
         }
     }
 
@@ -1217,8 +1271,24 @@ final class HudView extends View {
                 return "音";
             case MENU_SPEED:
                 return "×";
+            case MENU_BRIGHT:
+                return "亮";
+            case MENU_AUTO_BRIGHT:
+                return "A";
+            case MENU_WAKE:
+                return "◎";
             case MENU_FILE:
                 return "库";
+            case MENU_MORE:
+                return "…";
+            case MENU_BACK:
+                return "←";
+            case MENU_VOLUME:
+                return "声";
+            case MENU_SERVER:
+                return "服";
+            case MENU_SUB_STYLE:
+                return "字";
             case MENU_EXIT:
             default:
                 return "退";
@@ -1233,8 +1303,24 @@ final class HudView extends View {
                 return f.audioValue == null ? "无" : f.audioValue;
             case MENU_SPEED:
                 return speedText(f.speed);
+            case MENU_BRIGHT:
+                return f.brightnessText;
+            case MENU_AUTO_BRIGHT:
+                return f.autoBright ? "开" : "关";
+            case MENU_WAKE:
+                return f.wakeText;
             case MENU_FILE:
                 return "打开";
+            case MENU_MORE:
+                return "下一页";
+            case MENU_BACK:
+                return "上一页";
+            case MENU_VOLUME:
+                return f.volumeText;
+            case MENU_SERVER:
+                return f.serverText;
+            case MENU_SUB_STYLE:
+                return f.subStyleText;
             case MENU_EXIT:
             default:
                 return "2.5s+确认";
@@ -1249,8 +1335,24 @@ final class HudView extends View {
                 return frame.audioText == null ? "音轨加载中" : frame.audioText;
             case MENU_SPEED:
                 return "循环 0.5–2.0 · 重进恢复 1.0×";
+            case MENU_BRIGHT:
+                return frame.autoBright ? "自动亮度生效 · 用完即切换手动" : "循环 20%–100% · 仅本窗口";
+            case MENU_AUTO_BRIGHT:
+                return frame.autoBright ? "按环境光调节 · 电影场景建议开" : "固定亮度 · 不受环境光影响";
+            case MENU_WAKE:
+                return "低头多少唤回控件 · 越灵敏越容易触发";
             case MENU_FILE:
                 return "SMB 片库 · 收藏夹 · 最近播放";
+            case MENU_MORE:
+                return "音量 / 服务器 / 字幕样式 / 文件 / 退出";
+            case MENU_BACK:
+                return "回到常用设置";
+            case MENU_VOLUME:
+                return "媒体音量 · 25% 一档循环";
+            case MENU_SERVER:
+                return frame.serverText == null ? "服务器列表" : "下个片库使用所选服务器";
+            case MENU_SUB_STYLE:
+                return "字号与描边预设 · 记住选择";
             case MENU_EXIT:
             default:
                 return "回片库 · 保留进度，5 s 内可撤销";
@@ -1265,13 +1367,16 @@ final class HudView extends View {
         return s + "×";
     }
 
-    private void drawWakeBar(Canvas c, float relYaw, float relPitch, float alpha) {
-        float yaw = -relYaw;
-        float pitch = HudSpec.WAKE_PITCH - relPitch;
-        if (!onScreen(yaw, pitch)) {
-            return;
-        }
-        angularRect(yaw, pitch, HudSpec.WAKE_WIDTH, HudSpec.WAKE_HEIGHT, rect);
+    /**
+     * Pinned to the bottom of the eye instead of a world anchor: the gesture it
+     * explains is a head-relative downward glance, so the hint has to be
+     * findable no matter where the head was last pointing.
+     */
+    private void drawWakeHint(Canvas c, float alpha) {
+        float cy = sy(-36f);
+        float halfWidth = 16f * pxPerDeg;
+        float halfHeight = 1.9f * pxPerDeg;
+        rect.set(eyeCx - halfWidth, cy - halfHeight, eyeCx + halfWidth, cy + halfHeight);
         tint(fillPaint, 0x1FFFFFFF, (int) (alpha * 255));
         c.drawRoundRect(rect, rect.height() * 0.5f, rect.height() * 0.5f, fillPaint);
         tint(strokePaint, 0x47FFFFFF, (int) (alpha * 160));
@@ -1279,11 +1384,21 @@ final class HudView extends View {
         strokePaint.setStyle(Paint.Style.STROKE);
         c.drawRoundRect(rect, rect.height() * 0.5f, rect.height() * 0.5f, strokePaint);
 
+        float progress = Math.min(1f, Math.max(0f, frame.wakeProgress));
+        if (progress > 0f) {
+            RectF inner = rect2;
+            inner.set(rect.left + 2f, rect.bottom - 3f,
+                    rect.left + 2f + (rect.width() - 4f) * progress, rect.bottom - 1f);
+            tint(fillPaint, 0xD9FFB454, (int) (alpha * 255));
+            c.drawRoundRect(inner, 1f, 1f, fillPaint);
+        }
+
         textPaint.setTypeface(regular);
         textPaint.setTextSize(fontPx(1.05f));
         tint(textPaint, 0x66FFFFFF, (int) (alpha * 190));
         textPaint.setTextAlign(Paint.Align.CENTER);
-        c.drawText("轻看此处唤回控件", rect.centerX(), rect.centerY() + textPaint.getTextSize() * 0.34f, textPaint);
+        c.drawText(progress > 0f ? "保持低头 · 唤回控件" : "低头看下方唤回控件",
+                rect.centerX(), rect.centerY() + textPaint.getTextSize() * 0.34f, textPaint);
     }
 
     private void drawMicroProgress(Canvas c, float alpha) {
@@ -1321,6 +1436,22 @@ final class HudView extends View {
                 return "切换音轨";
             case MENU_SPEED:
                 return "切换播放速度";
+            case MENU_BRIGHT:
+                return "切换亮度档位";
+            case MENU_AUTO_BRIGHT:
+                return frame.autoBright ? "关闭自动亮度" : "开启自动亮度";
+            case MENU_WAKE:
+                return "切换唤回灵敏度";
+            case MENU_MORE:
+                return "打开第二页设置";
+            case MENU_BACK:
+                return "回到第一页";
+            case MENU_VOLUME:
+                return "调整音量";
+            case MENU_SERVER:
+                return "切换服务器";
+            case MENU_SUB_STYLE:
+                return "切换字幕样式";
             case MENU_EXIT:
                 return "退出播放";
             case EXIT_CANCEL:

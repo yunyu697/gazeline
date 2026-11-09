@@ -49,10 +49,23 @@ final class HudSpec {
     static final float EXIT_RATIO = 1.15f;
 
     static final float ANCHOR_YAW_LIMIT = 55f;
-    static final float ANCHOR_PITCH_UP_LIMIT = 35f;
-    static final float ANCHOR_PITCH_DOWN_LIMIT = -50f;
-    static final float ANCHOR_PULL_DEG_PER_S = 30f;
+    static final float ANCHOR_PITCH_UP_LIMIT = 40f;
+    static final float ANCHOR_PITCH_DOWN_LIMIT = -40f;
+    static final float ANCHOR_PULL_DEG_PER_S = 45f;
     static final float ANCHOR_SAFE_DEG = 12f;
+
+    /**
+     * The HUD follows the head horizontally: as soon as the gaze leaves this
+     * half-width the panel re-centres in front of the face, so it is never left
+     * behind at an oblique angle (which is what used to shear the bar). It is
+     * wide enough to aim at the ±30° row ends and the −37° recenter key.
+     */
+    static final float HUD_YAW_KEEP = 44f;
+
+    // Wake gesture: glance down past one of these pitches to bring the HUD back.
+    static final float WAKE_PITCH_FAST = 26f;
+    static final float WAKE_PITCH_DEFAULT = 40f;
+    static final float WAKE_PITCH_DEEP = 72f;
 
     // ------------------------------------------------------------- colors
 
@@ -76,11 +89,18 @@ final class HudSpec {
         SUBTITLE,
         MENU,
         RECENTER,
-        WAKE,
         MENU_SUBTITLE,
         MENU_AUDIO,
         MENU_SPEED,
+        MENU_BRIGHT,
+        MENU_AUTO_BRIGHT,
+        MENU_WAKE,
         MENU_FILE,
+        MENU_MORE,
+        MENU_BACK,
+        MENU_VOLUME,
+        MENU_SERVER,
+        MENU_SUB_STYLE,
         MENU_EXIT,
         EXIT_CANCEL,
         EXIT_OK,
@@ -128,8 +148,24 @@ final class HudSpec {
                     return "音轨";
                 case MENU_SPEED:
                     return "播放速度";
+                case MENU_BRIGHT:
+                    return "亮度";
+                case MENU_AUTO_BRIGHT:
+                    return "自动亮度";
+                case MENU_WAKE:
+                    return "唤回灵敏度";
                 case MENU_FILE:
                     return "文件管理";
+                case MENU_MORE:
+                    return "更多设置";
+                case MENU_BACK:
+                    return "返回";
+                case MENU_VOLUME:
+                    return "音量";
+                case MENU_SERVER:
+                    return "切换服务器";
+                case MENU_SUB_STYLE:
+                    return "字幕样式";
                 case BROWSER_PREV:
                     return "上一页";
                 case BROWSER_NEXT:
@@ -146,7 +182,6 @@ final class HudSpec {
                     return "确认退出";
                 case BROWSER_ITEM:
                     return "文件";
-                case WAKE:
                 default:
                     return "唤回控件";
             }
@@ -262,10 +297,6 @@ final class HudSpec {
     static final Target SUBTITLE = new Target(Id.SUBTITLE, -30f, -18f, 8f, L2_MS, true, true, false);
     static final Target MENU = new Target(Id.MENU, 30f, -18f, 8f, L2_MS, true, true, false);
     static final Target RECENTER = new Target(Id.RECENTER, -37f, -25f, 7.5f, L2_MS, true, true, true);
-    // The wake target is intentionally much larger than the thin hint bar it
-    // draws: a real headset cannot hold a 3° strip for 800 ms, so any clear
-    // downward glance at the control band brings the HUD back.
-    static final Target WAKE = new Target(Id.WAKE, 0f, -38f, 64f, 16f, WAKE_DWELL_MS);
 
     static final Target[] ROW = {SUBTITLE, REWIND, PLAY, FORWARD, MENU};
 
@@ -273,18 +304,40 @@ final class HudSpec {
 
     // S4 rows: settings (L2) + file browser + isolated exit (L3).
     static final Target MENU_SUBTITLE_T = new Target(
-            Id.MENU_SUBTITLE, 0f, 15.6f, 52f, 7.2f, L2_MS, true, true);
+            Id.MENU_SUBTITLE, 0f, 22.4f, 52f, 6.2f, L2_MS, true, true);
     static final Target MENU_AUDIO_T = new Target(
-            Id.MENU_AUDIO, 0f, 8.3f, 52f, 7.2f, L2_MS, true, true);
+            Id.MENU_AUDIO, 0f, 15.5f, 52f, 6.2f, L2_MS, true, true);
     static final Target MENU_SPEED_T = new Target(
-            Id.MENU_SPEED, 0f, 1.0f, 52f, 7.2f, L2_MS, true, true);
-    static final Target MENU_FILE_T = new Target(
-            Id.MENU_FILE, 0f, -6.3f, 52f, 7.2f, L2_MS, true, true);
+            Id.MENU_SPEED, 0f, 8.6f, 52f, 6.2f, L2_MS, true, true);
+    static final Target MENU_BRIGHT_T = new Target(
+            Id.MENU_BRIGHT, 0f, 1.7f, 52f, 6.2f, L2_MS, true, true);
+    static final Target MENU_AUTO_BRIGHT_T = new Target(
+            Id.MENU_AUTO_BRIGHT, 0f, -5.2f, 52f, 6.2f, L2_MS, true, true);
+    static final Target MENU_WAKE_T = new Target(
+            Id.MENU_WAKE, 0f, -12.1f, 52f, 6.2f, L2_MS, true, true);
+    static final Target MENU_MORE_T = new Target(
+            Id.MENU_MORE, 0f, -19.0f, 52f, 6.2f, L2_MS, true, true);
+    static final Target MENU_VOLUME_T = new Target(
+            Id.MENU_VOLUME, 0f, 22.4f, 52f, 6.2f, L2_MS, true, true);
+    static final Target MENU_SERVER_T = new Target(
+            Id.MENU_SERVER, 0f, 15.5f, 52f, 6.2f, L2_MS, true, true);
+    static final Target MENU_SUB_STYLE_T = new Target(
+            Id.MENU_SUB_STYLE, 0f, 8.6f, 52f, 6.2f, L2_MS, true, true);
+    static final Target MENU_FILE_P2_T = new Target(
+            Id.MENU_FILE, 0f, 1.7f, 52f, 6.2f, L2_MS, true, true);
+    static final Target MENU_BACK_T = new Target(
+            Id.MENU_BACK, 0f, -5.2f, 52f, 6.2f, L1_MS, true, true);
     static final Target MENU_EXIT_T = new Target(
-            Id.MENU_EXIT, 0f, -14.6f, 52f, 8.4f, L3_MS, true, true);
+            Id.MENU_EXIT, 0f, -12.1f, 52f, 6.2f, L3_MS, true, true);
 
-    static final Target[] MENU_ROWS = {
-            MENU_SUBTITLE_T, MENU_AUDIO_T, MENU_SPEED_T, MENU_FILE_T, MENU_EXIT_T
+    /** Page 1 keeps the everyday controls; 更多设置 flips to page 2. */
+    static final Target[] MENU_ROWS_P1 = {
+            MENU_SUBTITLE_T, MENU_AUDIO_T, MENU_SPEED_T, MENU_BRIGHT_T,
+            MENU_AUTO_BRIGHT_T, MENU_WAKE_T, MENU_MORE_T
+    };
+    static final Target[] MENU_ROWS_P2 = {
+            MENU_VOLUME_T, MENU_SERVER_T, MENU_SUB_STYLE_T, MENU_FILE_P2_T,
+            MENU_BACK_T, MENU_EXIT_T
     };
 
     // Exit confirmation: default focus is cancel; confirming takes another L2.
@@ -297,13 +350,13 @@ final class HudSpec {
 
     // ------------------------------------------------------------- menu layout
 
-    static final float MENU_W = 56f;
-    static final float MENU_H = 57f;
+    static final float MENU_W = 58f;
+    static final float MENU_H = 70f;
     static final float MENU_ROW_W = 52f;
-    static final float MENU_HEADER_PITCH = 25.2f;
-    static final float MENU_DIVIDER_PITCH = 21.8f;
-    static final float MENU_FOOTER1_PITCH = -22.0f;
-    static final float MENU_FOOTER2_PITCH = -25.0f;
+    static final float MENU_HEADER_PITCH = 29.4f;
+    static final float MENU_DIVIDER_PITCH = 26.2f;
+    static final float MENU_FOOTER1_PITCH = -29.6f;
+    static final float MENU_FOOTER2_PITCH = -32.6f;
 
     static final float CONFIRM_W = 42f;
     static final float CONFIRM_H = 30f;
@@ -363,7 +416,4 @@ final class HudSpec {
     static final float SUB_HEIGHT = 3f;
     static final float BAR_PITCH = -11f;
     static final float BAR_WIDTH = 75f;
-    static final float WAKE_PITCH = -39f;
-    static final float WAKE_WIDTH = 25f;
-    static final float WAKE_HEIGHT = 3f;
 }

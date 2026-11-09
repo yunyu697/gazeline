@@ -29,6 +29,7 @@ public class CalibActivity extends Activity
     static final String EXTRA_SENSOR = "sensor";
 
     private static final long SELF_TEST_MS = 20000;
+    private static final long SENSOR_WATCHDOG_MS = 1200;
     private static final int STEP_WARN_AT = 6;
 
     private CalibView view;
@@ -38,7 +39,10 @@ public class CalibActivity extends Activity
     private Sensor rotationSensor;
     private boolean sensorWanted;
     private boolean sensorActive;
-    private boolean sensorPrimed;
+    /** A VR shell may never hand us head samples; then drag-look takes over. */
+    private boolean sensorFallback;
+    private volatile long lastSensorEventMs;
+    private long openedMs;
 
     private CalibParams params;
     private CalibParams saved;
@@ -64,6 +68,14 @@ public class CalibActivity extends Activity
 
     private float yaw;
     private float pitch;
+    /**
+     * Raw head pose is world-absolute, but the calibration card lives in its
+     * own content angles. The anchor captured on open (and whenever the basis
+     * is rebuilt) makes "straight ahead" mean the card centre, so the page is
+     * usable whatever world direction the headset happened to boot facing.
+     */
+    private float anchorYaw;
+    private float anchorPitch;
     private volatile float viewYaw;
     private volatile float viewPitch;
     private float angularSpeed;
@@ -101,11 +113,15 @@ public class CalibActivity extends Activity
         }
         sensorWanted = getIntent().getBooleanExtra(EXTRA_SENSOR, true);
         sensorActive = sensorWanted && rotationSensor != null;
-        sensorPrimed = !sensorActive;
+        sensorFallback = false;
+        lastSensorEventMs = 0;
 
         Matrix.setIdentityM(sensorMatrix, 0);
         feedback = new Feedback(this);
         gaze = new GazeController(this);
+        // The −/+ columns sit at ±37°, outside the follow band; keep the classic
+        // world anchor so both ends of every row stay aimable.
+        gaze.setYawFollow(false);
 
         view = new CalibView(this);
         view.setListener(this);
@@ -117,10 +133,12 @@ public class CalibActivity extends Activity
         setContentView(view);
 
         applyLayer(false);
-        if (sensorPrimed) {
-            updateRotation();
-            gaze.setAnchor(viewYaw, viewPitch);
-        }
+        openedMs = SystemClock.elapsedRealtime();
+        // Anchor from whatever pose we have right now (drag offsets when no
+        // head sample has arrived yet); the anchor is refreshed on the first
+        // sample, on an up/down flip and when a stalled sensor stream recovers.
+        updateRotation();
+        anchorHere();
         selfTestStart = SystemClock.elapsedRealtime();
         showHint("可读性自测 20 s：先看右半三行样本，再看边缘直线");
     }
@@ -132,10 +150,10 @@ public class CalibActivity extends Activity
         if (sensorActive) {
             sensors.registerListener(this, rotationSensor, SensorManager.SENSOR_DELAY_GAME);
         }
-        if (!sensorActive) {
-            updateRotation();
-            gaze.setAnchor(viewYaw, viewPitch);
-        }
+        // Re-anchor on every resume: the panel should sit in front of the face
+        // as it is held now, not where it was when the page was first opened.
+        updateRotation();
+        anchorHere();
         prevTickMs = 0;
         ui.post(tick);
     }
@@ -207,10 +225,12 @@ public class CalibActivity extends Activity
             view.showHint("");
         }
 
-        if (sensorPrimed) {
-            gaze.update(now, viewYaw, viewPitch, angularSpeed, true, true);
-        }
-        view.setView(viewYaw, viewPitch);
+        checkSensorWatchdog(now);
+        float relYaw = GazeController.wrap(viewYaw - anchorYaw);
+        float relPitch = viewPitch - anchorPitch;
+        relPitch = relPitch > 89f ? 89f : (relPitch < -89f ? -89f : relPitch);
+        gaze.update(now, relYaw, relPitch, angularSpeed, true, true);
+        view.setView(relYaw, relPitch);
         view.setGaze(gaze.readout());
         checkStepWarning();
     }
@@ -219,6 +239,25 @@ public class CalibActivity extends Activity
         if (stepsSinceReset >= STEP_WARN_AT && !folded) {
             view.setResetPulse(true);
         }
+    }
+
+    /**
+     * If the rotation vector never shows up (some VR shells keep the sensor to
+     * themselves) or the stream stalls, switch to drag-look and re-anchor, so
+     * the gaze controls stay reachable instead of hanging on a frozen pose.
+     */
+    private void checkSensorWatchdog(long now) {
+        if (!sensorActive || sensorFallback) {
+            return;
+        }
+        long last = lastSensorEventMs > 0 ? lastSensorEventMs : openedMs;
+        if (now - last <= SENSOR_WATCHDOG_MS) {
+            return;
+        }
+        sensorFallback = true;
+        updateRotation();
+        anchorHere();
+        showHint("未收到头部传感：改用拖动瞄准，注视确认照常可用");
     }
 
     // ------------------------------------------------------------- layers
@@ -232,7 +271,7 @@ public class CalibActivity extends Activity
 
     private void applyLayer(boolean protect) {
         long now = SystemClock.elapsedRealtime();
-        gaze.setLayer(targets(), null, false);
+        gaze.setLayer(targets(), false);
         if (protect) {
             gaze.protect(now, HudSpec.MENU_PROTECT_MS);
         }
@@ -432,11 +471,16 @@ public class CalibActivity extends Activity
         if (event.sensor.getType() != Sensor.TYPE_ROTATION_VECTOR) {
             return;
         }
+        boolean first = lastSensorEventMs == 0;
+        lastSensorEventMs = SystemClock.elapsedRealtime();
         SensorManager.getRotationMatrixFromVector(sensorMatrix, event.values);
         updateRotation();
-        if (!sensorPrimed) {
-            sensorPrimed = true;
-            gaze.setAnchor(viewYaw, viewPitch);
+        if (first || sensorFallback) {
+            // The first sample defines "straight ahead" (the pose at open was a
+            // guess from an identity basis), and a recovered stream lands on a
+            // different basis, so both re-anchor the card in front of the face.
+            sensorFallback = false;
+            anchorHere();
         }
     }
 
@@ -450,16 +494,21 @@ public class CalibActivity extends Activity
      */
     private void updateRotation() {
         int rotation = displayRotation();
-        if (camRotation < 0 || !sensorActive) {
+        boolean live = sensorLive();
+        boolean flipped = false;
+        if (camRotation < 0 || !live) {
             camRotation = rotation;
         } else if (rotation != camRotation) {
             boolean bothLandscape = isLandscape(camRotation) && isLandscape(rotation);
             if (!bothLandscape || screenUpComponent(camRotation) < -UP_FLIP_SIN) {
                 camRotation = rotation;
+                // An up/down swap mirrors the whole basis; re-anchor afterwards
+                // so the panel does not end up behind the user's head.
+                flipped = true;
             }
         }
 
-        if (sensorActive) {
+        if (live) {
             int axisX;
             int axisY;
             switch (camRotation) {
@@ -514,6 +563,24 @@ public class CalibActivity extends Activity
             viewYaw = GazeController.wrap((float) Math.toDegrees(Math.atan2(fx, -fz)));
             viewPitch = vp;
         }
+
+        if (flipped && gaze != null) {
+            anchorHere();
+        }
+    }
+
+    private boolean sensorLive() {
+        return sensorActive && !sensorFallback;
+    }
+
+    /**
+     * Pin the card to the pose the head has right now: the gaze layer works in
+     * anchor-relative angles, while the raw pose stays world-absolute.
+     */
+    private void anchorHere() {
+        anchorYaw = viewYaw;
+        anchorPitch = viewPitch;
+        gaze.setAnchor(0f, 0f);
     }
 
     private static boolean isLandscape(int rotation) {

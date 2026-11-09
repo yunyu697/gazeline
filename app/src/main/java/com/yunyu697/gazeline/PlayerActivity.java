@@ -123,6 +123,30 @@ public class PlayerActivity extends Activity
     private String subtitleSource;
     private boolean subtitleLoading;
     private String displayMode = "";
+
+    // In-VR brightness is a per-window override, so it needs no WRITE_SETTINGS
+    // and does not change the phone's own setting.
+    private static final float[] BRIGHT_LEVELS = {
+            0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1f
+    };
+    private static final float[] WAKE_PITCHES = {
+            HudSpec.WAKE_PITCH_FAST, HudSpec.WAKE_PITCH_DEFAULT, HudSpec.WAKE_PITCH_DEEP
+    };
+    private static final String[] WAKE_LABELS = {"灵敏", "标准", "深沉"};
+    private static final String[] SUB_STYLE_LABELS = {"标准", "大字", "小字·无描边"};
+    private static final float[] SUB_STYLE_SCALE = {1f, 1.22f, 0.86f};
+    private static final String DISPLAY_PREFS = "gazeline_display";
+
+    private Sensor lightSensor;
+    private int brightLevel = 4;
+    private boolean autoBright;
+    private int wakeLevel = 1;
+    private int subStyle;
+    private int menuPage;
+    private float lux = 50f;
+    private float autoTarget = -1f;
+    private long lastBrightApplyMs;
+
     private boolean sensorPrimed;
     private String statusText = "";
     private long statusUntil;
@@ -216,6 +240,7 @@ public class PlayerActivity extends Activity
         sensors = (SensorManager) getSystemService(SENSOR_SERVICE);
         if (sensors != null) {
             rotationSensor = sensors.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
+            lightSensor = sensors.getDefaultSensor(Sensor.TYPE_LIGHT);
         }
         sensorActive = sensorWanted && rotationSensor != null;
 
@@ -224,7 +249,8 @@ public class PlayerActivity extends Activity
         feedback = new Feedback(this);
         gaze = new GazeController(this);
         menuGaze = new GazeController(this);
-        menuGaze.setLayer(HudSpec.MENU_ROWS, null, false);
+        menuGaze.setLayer(HudSpec.MENU_ROWS_P1, false);
+        loadDisplayPrefs();
 
         if (!browserOnly) {
             glView = new GLSurfaceView(this);
@@ -283,6 +309,9 @@ public class PlayerActivity extends Activity
         if (sensorActive) {
             sensors.registerListener(this, rotationSensor, SensorManager.SENSOR_DELAY_GAME);
         }
+        registerLight();
+        autoTarget = -1f;
+        refreshBrightness(SystemClock.elapsedRealtime());
         recPhase = REC_IDLE;
         maskAlpha = 0f;
         flashAlpha = 0f;
@@ -517,6 +546,8 @@ public class PlayerActivity extends Activity
 
         float wakeAlpha = playing ? Math.max(0f, 1f - hudAlpha) : 0f;
 
+        refreshBrightness(now);
+
         buildFrame(now, hudAlpha, wakeAlpha);
         hud.setFrame(frame, now);
     }
@@ -594,10 +625,33 @@ public class PlayerActivity extends Activity
         overlayHintUntil = 0;
         menuOpenedAt = now;
         menuLeaveSince = 0;
-        menuGaze.setLayer(HudSpec.MENU_ROWS, null, false);
+        menuPage = 0;
+        menuGaze.setLayer(menuRows(), false);
         menuGaze.setAnchor(viewYaw, viewPitch);
         menuGaze.onHudOpened(now);
         menuGaze.protect(now, HudSpec.MENU_PROTECT_MS);
+        feedback.menuOpen();
+        lastActivityMs = now;
+    }
+
+    /**
+     * Page 1 holds the controls touched during playback; page 2 collects the
+     * ones that are set once (volume, server, subtitle style) plus file/exit,
+     * so neither page has to squeeze extra rows into the panel.
+     */
+    private HudSpec.Target[] menuRows() {
+        return menuPage == 0 ? HudSpec.MENU_ROWS_P1 : HudSpec.MENU_ROWS_P2;
+    }
+
+    private void setMenuPage(int page) {
+        long now = SystemClock.elapsedRealtime();
+        menuPage = page == 0 ? 0 : 1;
+        menuGaze.setLayer(menuRows(), false);
+        menuGaze.setAnchor(viewYaw, viewPitch);
+        menuGaze.onHudOpened(now);
+        menuGaze.protect(now, HudSpec.MENU_PROTECT_MS);
+        overlayHint = menuPage == 0 ? "已回到第一页" : "第二页：音量 / 服务器 / 字幕样式";
+        overlayHintUntil = now + 1800;
         feedback.menuOpen();
         lastActivityMs = now;
     }
@@ -610,7 +664,7 @@ public class PlayerActivity extends Activity
         overlayHint = "";
         overlayHintUntil = 0;
         menuLeaveSince = 0;
-        menuGaze.setLayer(HudSpec.CONFIRM_TARGETS, null, false);
+        menuGaze.setLayer(HudSpec.CONFIRM_TARGETS, false);
         menuGaze.setAnchor(viewYaw, viewPitch);
         menuGaze.onHudOpened(now);
         menuGaze.protect(now, HudSpec.CONFIRM_PROTECT_MS);
@@ -700,6 +754,7 @@ public class PlayerActivity extends Activity
         frame.gaze = gaze.readout();
         frame.hudAlpha = hudAlpha;
         frame.wakeAlpha = wakeAlpha;
+        frame.wakeProgress = frame.gaze == null ? 0f : frame.gaze.wakeProgress;
         frame.maskAlpha = maskAlpha;
         frame.flashAlpha = flashAlpha;
         frame.recenterCountdown = recPhase == REC_COUNTDOWN ? recCountdown : 0f;
@@ -709,6 +764,17 @@ public class PlayerActivity extends Activity
         frame.overlayGaze = menuGaze.readout();
         frame.overlayHint = overlayHint;
         frame.speed = playbackRate;
+        frame.brightnessText = brightnessText();
+        frame.autoBright = autoBright;
+        frame.wakeText = WAKE_LABELS[wakeLevel];
+        frame.menuTargets = menuRows();
+        frame.menuPage = menuPage;
+        frame.menuPages = 2;
+        frame.volumeText = volumeText();
+        frame.serverText = serverText();
+        frame.subStyleText = SUB_STYLE_LABELS[subStyle];
+        frame.subtitleScale = SUB_STYLE_SCALE[subStyle];
+        frame.subtitleOutline = subStyle != 2;
         frame.defaultFocusHint = overlay != OVERLAY_BROWSER
                 && menuGaze.readout().focus == null
                 && now - overlayStart < HudSpec.MENU_PROTECT_MS;
@@ -745,6 +811,190 @@ public class PlayerActivity extends Activity
         gaze.onHudOpened(now);
     }
 
+    // ------------------------------------------------------------- display
+
+    private void loadDisplayPrefs() {
+        android.content.SharedPreferences p =
+                getSharedPreferences(DISPLAY_PREFS, MODE_PRIVATE);
+        brightLevel = p.getInt("level", 4);
+        autoBright = p.getBoolean("auto", false);
+        wakeLevel = p.getInt("wake", 1);
+        subStyle = p.getInt("sub_style", 0);
+        if (brightLevel < 0 || brightLevel >= BRIGHT_LEVELS.length) {
+            brightLevel = 4;
+        }
+        if (wakeLevel < 0 || wakeLevel >= WAKE_LABELS.length) {
+            wakeLevel = 1;
+        }
+        if (subStyle < 0 || subStyle >= SUB_STYLE_LABELS.length) {
+            subStyle = 0;
+        }
+        gaze.setWakePitch(WAKE_PITCHES[wakeLevel]);
+    }
+
+    private void saveDisplayPrefs() {
+        getSharedPreferences(DISPLAY_PREFS, MODE_PRIVATE).edit()
+                .putInt("level", brightLevel)
+                .putBoolean("auto", autoBright)
+                .putInt("wake", wakeLevel)
+                .putInt("sub_style", subStyle)
+                .apply();
+    }
+
+    private void registerLight() {
+        if (sensors == null || lightSensor == null || !autoBright) {
+            return;
+        }
+        sensors.registerListener(this, lightSensor, SensorManager.SENSOR_DELAY_NORMAL);
+    }
+
+    private void refreshBrightness(long now) {
+        if (!autoBright) {
+            applyBrightness(BRIGHT_LEVELS[brightLevel]);
+            return;
+        }
+        float target = autoBrightnessTarget();
+        if (autoTarget < 0f) {
+            autoTarget = target;
+        } else {
+            autoTarget += (target - autoTarget) * 0.35f;
+        }
+        if (now - lastBrightApplyMs < 250) {
+            return;
+        }
+        lastBrightApplyMs = now;
+        applyBrightness(autoTarget);
+    }
+
+    /** 1 lx → 15 %, 10 000 lx → 100 %, log scale like the system curve. */
+    private float autoBrightnessTarget() {
+        float t = (float) (Math.log10(Math.max(1f, lux)) / 4.0);
+        t = Math.max(0f, Math.min(1f, t));
+        return 0.15f + 0.85f * t;
+    }
+
+    private void applyBrightness(float value) {
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        if (Math.abs(lp.screenBrightness - value) < 0.005f) {
+            return;
+        }
+        lp.screenBrightness = Math.max(0.02f, Math.min(1f, value));
+        getWindow().setAttributes(lp);
+    }
+
+    private void cycleBrightness() {
+        autoBright = false;
+        brightLevel = (brightLevel + 1) % BRIGHT_LEVELS.length;
+        autoTarget = -1f;
+        saveDisplayPrefs();
+        refreshBrightness(SystemClock.elapsedRealtime());
+        showStatus("亮度 " + brightnessText());
+    }
+
+    private void toggleAutoBright() {
+        autoBright = !autoBright;
+        autoTarget = -1f;
+        if (autoBright) {
+            registerLight();
+        } else if (sensors != null && lightSensor != null) {
+            sensors.unregisterListener(this, lightSensor);
+        }
+        saveDisplayPrefs();
+        refreshBrightness(SystemClock.elapsedRealtime());
+        showStatus(autoBright ? "自动亮度已开启" : "自动亮度已关闭");
+    }
+
+    private void cycleWake() {
+        wakeLevel = (wakeLevel + 1) % WAKE_LABELS.length;
+        gaze.setWakePitch(WAKE_PITCHES[wakeLevel]);
+        saveDisplayPrefs();
+        showStatus("唤回灵敏度 " + WAKE_LABELS[wakeLevel]
+                + " · 低头 " + (int) WAKE_PITCHES[wakeLevel] + "°");
+    }
+
+    private String brightnessText() {
+        if (autoBright) {
+            return "自动 " + Math.round((autoTarget < 0f ? autoBrightnessTarget() : autoTarget) * 100f) + "%";
+        }
+        return Math.round(BRIGHT_LEVELS[brightLevel] * 100f) + "%";
+    }
+
+    private android.media.AudioManager audioManager() {
+        return (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+    }
+
+    private String volumeText() {
+        android.media.AudioManager am = audioManager();
+        if (am == null) {
+            return "不可用";
+        }
+        int max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC);
+        if (max <= 0) {
+            return "不可用";
+        }
+        return Math.round(am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+                * 100f / max) + "%";
+    }
+
+    /** 25 % steps, wrapping back to silence at the top of the scale. */
+    private void cycleVolume() {
+        android.media.AudioManager am = audioManager();
+        if (am == null) {
+            showStatus("无法调节音量");
+            return;
+        }
+        int max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC);
+        if (max <= 0) {
+            showStatus("无法调节音量");
+            return;
+        }
+        int step = Math.max(1, Math.round(max / 4f));
+        int next = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC) + step;
+        if (next > max) {
+            next = 0;
+        }
+        am.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, next, 0);
+        showStatus("音量 " + Math.round(next * 100f / max) + "%");
+    }
+
+    private String serverText() {
+        SmbSettings current = SmbSettings.load(this);
+        if (current.profileName.length() > 0) {
+            return current.profileName;
+        }
+        java.util.List<SmbSettings.Profile> list = SmbSettings.profiles(this);
+        return list.isEmpty() ? "未配置" : list.get(0).name;
+    }
+
+    /**
+     * Playback already holds a connection, so switching only changes the
+     * record the library will use next time; saying so avoids a silent no-op.
+     */
+    private void cycleServerRecord() {
+        java.util.List<SmbSettings.Profile> list = SmbSettings.profiles(this);
+        if (list.isEmpty()) {
+            showStatus("还没有保存的服务器 · 先在片库添加");
+            return;
+        }
+        SmbSettings current = SmbSettings.load(this);
+        int index = 0;
+        for (int i = 0; i < list.size(); i++) {
+            if (list.get(i).name.equals(current.profileName)) {
+                index = i;
+                break;
+            }
+        }
+        SmbSettings.Profile next = list.get((index + 1) % list.size());
+        current.selectProfile(this, next.name);
+        showStatus("已选服务器 " + next.name + " · 重新打开片库生效");
+    }
+
+    private void cycleSubtitleStyle() {
+        subStyle = (subStyle + 1) % SUB_STYLE_LABELS.length;
+        saveDisplayPrefs();
+        showStatus("字幕样式 " + SUB_STYLE_LABELS[subStyle]);
+    }
+
     @Override
     public void onGazeConfirm(HudSpec.Target target) {
         feedback.confirm();
@@ -777,8 +1027,32 @@ public class PlayerActivity extends Activity
             case MENU_SPEED:
                 cycleSpeed();
                 break;
+            case MENU_BRIGHT:
+                cycleBrightness();
+                break;
+            case MENU_AUTO_BRIGHT:
+                toggleAutoBright();
+                break;
+            case MENU_WAKE:
+                cycleWake();
+                break;
             case MENU_FILE:
                 openBrowser();
+                break;
+            case MENU_MORE:
+                setMenuPage(1);
+                break;
+            case MENU_BACK:
+                setMenuPage(0);
+                break;
+            case MENU_VOLUME:
+                cycleVolume();
+                break;
+            case MENU_SERVER:
+                cycleServerRecord();
+                break;
+            case MENU_SUB_STYLE:
+                cycleSubtitleStyle();
                 break;
             case BROWSER_ITEM:
             case BROWSER_PREV:
@@ -1216,7 +1490,7 @@ public class PlayerActivity extends Activity
         browserTargets.add(HudSpec.browserMode(
                 "360".equals(settings.projection) ? "360°" : "SBS"));
         browserTargets.add(HudSpec.BROWSER_CLOSE_T);
-        menuGaze.setLayer(browserTargets.toArray(new HudSpec.Target[0]), null, false);
+        menuGaze.setLayer(browserTargets.toArray(new HudSpec.Target[0]), false);
         menuGaze.protect(SystemClock.elapsedRealtime(), 260);
         browserGen++;
     }
@@ -1379,6 +1653,10 @@ public class PlayerActivity extends Activity
 
     @Override
     public void onSensorChanged(SensorEvent event) {
+        if (event.sensor.getType() == Sensor.TYPE_LIGHT) {
+            lux = Math.max(1f, event.values[0]);
+            return;
+        }
         if (event.sensor.getType() != Sensor.TYPE_ROTATION_VECTOR) {
             return;
         }

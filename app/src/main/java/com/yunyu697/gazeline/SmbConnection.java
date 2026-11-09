@@ -61,6 +61,12 @@ final class SmbConnection implements Closeable {
 
     static SmbConnection connect(String host, int port, String shareName,
                                  String user, String password) throws IOException {
+        return connect(host, port, shareName, user, password, false);
+    }
+
+    static SmbConnection connect(String host, int port, String shareName,
+                                 String user, String password,
+                                 boolean anonymous) throws IOException {
         SmbConfig config = SmbConfig.builder()
                 .withSigningRequired(true)
                 .withTimeout(20, TimeUnit.SECONDS)
@@ -72,8 +78,10 @@ final class SmbConnection implements Closeable {
         DiskShare share = null;
         try {
             connection = client.connect(host, port);
-            session = connection.authenticate(
-                    new AuthenticationContext(user, password.toCharArray(), null));
+            AuthenticationContext auth = anonymous
+                    ? AuthenticationContext.guest()
+                    : new AuthenticationContext(user, password.toCharArray(), null);
+            session = connection.authenticate(auth);
             share = (DiskShare) session.connectShare(shareName);
             Log.i(TAG, "connected " + host + ":" + port + " share=" + shareName
                     + " signing=" + session.isSigningRequired());
@@ -81,6 +89,28 @@ final class SmbConnection implements Closeable {
         } catch (IOException | RuntimeException e) {
             closeQuietly(share, session, connection, client);
             throw e;
+        }
+    }
+
+    /** Short label for the negotiated dialect, shown in the connection card. */
+    String dialectName() {
+        try {
+            switch (connection.getNegotiatedProtocol().getDialect()) {
+                case SMB_2_0_2:
+                    return "SMB2";
+                case SMB_2_1:
+                    return "SMB2.1";
+                case SMB_3_0:
+                    return "SMB3";
+                case SMB_3_0_2:
+                    return "SMB3.0.2";
+                case SMB_3_1_1:
+                    return "SMB3.1.1";
+                default:
+                    return "SMB";
+            }
+        } catch (Throwable t) {
+            return "SMB";
         }
     }
 

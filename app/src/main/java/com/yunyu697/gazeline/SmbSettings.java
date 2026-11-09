@@ -26,6 +26,8 @@ final class SmbSettings {
     private static final String KEY_PATH = "path";
     private static final String KEY_USER = "user";
     private static final String KEY_PASS = "password";
+    private static final String KEY_ANONYMOUS = "anonymous";
+    private static final String KEY_AUTO_RECONNECT = "autoReconnect";
     private static final String KEY_PROJECTION = "projection";
     private static final String KEY_PROFILES = "profiles";
     private static final String KEY_ACTIVE = "active";
@@ -43,9 +45,12 @@ final class SmbSettings {
         String user = "";
         String password = "";
         String projection = "360";
+        boolean anonymous;
+        boolean autoReconnect = true;
 
         boolean isConfigured() {
-            return host.length() > 0 && share.length() > 0 && user.length() > 0;
+            return host.length() > 0 && share.length() > 0
+                    && (user.length() > 0 || anonymous);
         }
 
         String summary() {
@@ -60,6 +65,10 @@ final class SmbSettings {
     String path = "";
     String user = "";
     String password = "";
+    /** Guest login: the account and password fields are ignored when set. */
+    boolean anonymous;
+    /** Reconnect to the active record when the library opens. */
+    boolean autoReconnect = true;
     /** Last projection picked in the library: "360" or "sbs". */
     String projection = "360";
     /** Name of the record the flat fields were loaded from; "" when unsaved. */
@@ -74,6 +83,8 @@ final class SmbSettings {
         s.path = p.getString(KEY_PATH, "");
         s.user = p.getString(KEY_USER, "");
         s.password = p.getString(KEY_PASS, "");
+        s.anonymous = p.getBoolean(KEY_ANONYMOUS, false);
+        s.autoReconnect = p.getBoolean(KEY_AUTO_RECONNECT, true);
         s.projection = p.getString(KEY_PROJECTION, "360");
         s.profileName = p.getString(KEY_ACTIVE, "");
         if (!p.contains(KEY_PROFILES) && s.isConfigured()) {
@@ -141,6 +152,8 @@ final class SmbSettings {
         path = p.path;
         user = p.user;
         password = p.password;
+        anonymous = p.anonymous;
+        autoReconnect = p.autoReconnect;
         projection = p.projection;
         profileName = p.name;
         writeCurrent(context);
@@ -183,6 +196,8 @@ final class SmbSettings {
                 p.path = o.optString("path", "");
                 p.user = o.optString("user", "");
                 p.password = o.optString("password", "");
+                p.anonymous = o.optBoolean("anonymous", false);
+                p.autoReconnect = o.optBoolean("autoReconnect", true);
                 p.projection = o.optString("projection", "360");
                 if (p.name.length() > 0) {
                     out.add(p);
@@ -200,7 +215,8 @@ final class SmbSettings {
     }
 
     boolean isConfigured() {
-        return host.length() > 0 && share.length() > 0 && user.length() > 0;
+        return host.length() > 0 && share.length() > 0
+                && (user.length() > 0 || anonymous);
     }
 
     String summary() {
@@ -255,6 +271,8 @@ final class SmbSettings {
         p.path = path;
         p.user = user;
         p.password = password;
+        p.anonymous = anonymous;
+        p.autoReconnect = autoReconnect;
         p.projection = projection;
         return p;
     }
@@ -290,6 +308,8 @@ final class SmbSettings {
                 .putString(KEY_PATH, path)
                 .putString(KEY_USER, user)
                 .putString(KEY_PASS, password)
+                .putBoolean(KEY_ANONYMOUS, anonymous)
+                .putBoolean(KEY_AUTO_RECONNECT, autoReconnect)
                 .putString(KEY_PROJECTION, projection)
                 .putString(KEY_ACTIVE, profileName)
                 .apply();
@@ -307,6 +327,8 @@ final class SmbSettings {
                 o.put("path", p.path);
                 o.put("user", p.user);
                 o.put("password", p.password);
+                o.put("anonymous", p.anonymous);
+                o.put("autoReconnect", p.autoReconnect);
                 o.put("projection", p.projection);
                 arr.put(o);
             } catch (Throwable ignored) {

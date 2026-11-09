@@ -3,9 +3,10 @@ package com.yunyu697.gazeline;
 /**
  * Gaze state machine from §1.2–1.7: hysteresis + debounce, 150 ms focus,
  * 250 ms arming, L1/L2/L3 dwell, angle-speed gating, cancel grace, cooldown,
- * wake bar and the recenter key's two-stage charge. It also keeps the HUD
- * anchor: the controls live at the head direction captured on open/recenter
- * and are pulled back only when the user has clearly looked away.
+ * the downward wake gesture and the recenter key's two-stage charge. It also
+ * keeps the HUD anchor: the controls live at the pitch captured on open and
+ * follow the head horizontally, so the panel is always in front of the face
+ * instead of being left behind at an oblique angle.
  */
 final class GazeController {
 
@@ -32,6 +33,8 @@ final class GazeController {
         float dwell;
         float relYaw;
         float relPitch;
+        /** 0–1 while the wake gesture is being held; 0 otherwise. */
+        float wakeProgress;
     }
 
     private final Listener listener;
@@ -68,24 +71,42 @@ final class GazeController {
 
     /** Which target set this controller drives: HUD row, S4 menu or exit dialog. */
     private HudSpec.Target[] targets = HudSpec.PLAYING_TARGETS;
-    private HudSpec.Target wakeTarget = HudSpec.WAKE;
     private boolean anchorPull = true;
     private long protectUntil;
+
+    /** Horizontal follow: the panel re-centres once the gaze leaves its band. */
+    private boolean yawFollow = true;
+
+    // Downward wake gesture (head-relative, so it is always reachable).
+    private float wakePitchDeg = HudSpec.WAKE_PITCH_DEFAULT;
+    private long wakeSince;
+    private boolean wakeArmed = true;
+    private float wakeProgress;
 
     GazeController(Listener listener) {
         this.listener = listener;
     }
 
     /**
-     * Re-point the state machine at another layer. The menu and dialog are
-     * anchored to the head direction captured when they open, so their targets
-     * are aimable by turning the head; a purely head-locked panel would put
-     * every row under the centre reticle and make selection impossible.
+     * Re-point the state machine at another layer. The menu and dialog keep the
+     * pitch captured when they open, so their rows are aimable by nodding; the
+     * horizontal anchor follows the head (see {@link #setYawFollow}).
      */
-    void setLayer(HudSpec.Target[] targets, HudSpec.Target wakeTarget, boolean anchorPull) {
+    void setLayer(HudSpec.Target[] targets, boolean anchorPull) {
         this.targets = targets;
-        this.wakeTarget = wakeTarget;
         this.anchorPull = anchorPull;
+    }
+
+    /**
+     * Calibration places its −/+ columns at ±37°, which is outside the follow
+     * band, so that page opts out and keeps the classic world anchor.
+     */
+    void setYawFollow(boolean yawFollow) {
+        this.yawFollow = yawFollow;
+    }
+
+    void setWakePitch(float deg) {
+        wakePitchDeg = deg;
     }
 
     /** Menu protection window: no target may be acquired before it expires. */
@@ -155,6 +176,40 @@ final class GazeController {
         }
 
         updateAnchor(viewYaw, viewPitch, dtSec, hudVisible);
+
+        if (!hudVisible) {
+            // The wake gesture is measured against the head, not against a world
+            // anchor: glancing down far enough always works, even after an
+            // hour of looking around. Once armed it stays armed until the gaze
+            // climbs back out of the band.
+            if (!wakeArmed) {
+                if (viewPitch > -wakePitchDeg * 0.75f) {
+                    wakeArmed = true;
+                }
+                wakeSince = 0;
+                wakeProgress = 0f;
+            } else if (viewPitch > -wakePitchDeg || speedPaused) {
+                wakeSince = 0;
+                wakeProgress = 0f;
+            } else if (wakeSince == 0) {
+                wakeSince = now;
+                wakeProgress = 0f;
+            } else if (now - wakeSince >= HudSpec.WAKE_DWELL_MS) {
+                wakeSince = 0;
+                wakeProgress = 0f;
+                wakeArmed = false;
+                refreshReadout(now);
+                listener.onWake();
+                return;
+            } else {
+                wakeProgress = (now - wakeSince) / (float) HudSpec.WAKE_DWELL_MS;
+            }
+            refreshReadout(now);
+            return;
+        }
+        wakeSince = 0;
+        wakeProgress = 0f;
+        wakeArmed = false;
 
         float py = wrap(viewYaw - anchorYaw);
         float pp = viewPitch - anchorPitch;
@@ -285,11 +340,7 @@ final class GazeController {
                 ? HudSpec.RECENTER_COOLDOWN_MS : HudSpec.COOLDOWN_MS);
         spent = t;
         spentOutSince = 0;
-        if (t.id == HudSpec.Id.WAKE) {
-            listener.onWake();
-        } else {
-            listener.onGazeConfirm(t);
-        }
+        listener.onGazeConfirm(t);
     }
 
     private void cancel(long now, boolean audible) {
@@ -330,27 +381,20 @@ final class GazeController {
         }
         HudSpec.Target best = null;
         float bestDist = Float.MAX_VALUE;
-        if (hudVisible) {
-            for (HudSpec.Target t : targets) {
-                if (t == cooldownTarget && now < cooldownUntil) {
-                    continue;
-                }
-                if (t == spent) {
-                    continue;
-                }
-                if (!t.hit(py, pp, ratio)) {
-                    continue;
-                }
-                float d = t.distance(py, pp);
-                if (d < bestDist) {
-                    bestDist = d;
-                    best = t;
-                }
+        for (HudSpec.Target t : targets) {
+            if (t == cooldownTarget && now < cooldownUntil) {
+                continue;
             }
-        } else if (wakeTarget != null) {
-            HudSpec.Target wake = wakeTarget;
-            if (wake.hit(py, pp, ratio) && now >= cooldownUntil && wake != spent) {
-                best = wake;
+            if (t == spent) {
+                continue;
+            }
+            if (!t.hit(py, pp, ratio)) {
+                continue;
+            }
+            float d = t.distance(py, pp);
+            if (d < bestDist) {
+                bestDist = d;
+                best = t;
             }
         }
         return best;
@@ -361,6 +405,28 @@ final class GazeController {
             return;
         }
         if (!visible || speedPaused) {
+            return;
+        }
+        if (yawFollow) {
+            // The panel is a heads-up layer: it sits at a fixed angular offset
+            // from the gaze and only snaps back when the gaze leaves its band.
+            // Snapping drops the focus so the jump cannot hand a dwell to
+            // whatever lands under the reticle; the band is wide enough that
+            // every button can still be aimed at without triggering it.
+            float relYaw = wrap(viewYaw - anchorYaw);
+            float relPitch = viewPitch - anchorPitch;
+            boolean jumpYaw = relYaw > HudSpec.HUD_YAW_KEEP || relYaw < -HudSpec.HUD_YAW_KEEP;
+            boolean jumpPitch = relPitch > HudSpec.ANCHOR_PITCH_UP_LIMIT
+                    || relPitch < HudSpec.ANCHOR_PITCH_DOWN_LIMIT;
+            if (jumpYaw || jumpPitch) {
+                if (jumpYaw) {
+                    anchorYaw = wrap(viewYaw);
+                }
+                if (jumpPitch) {
+                    anchorPitch = viewPitch;
+                }
+                clearFocus();
+            }
             return;
         }
         float relYaw = wrap(viewYaw - anchorYaw);
@@ -400,6 +466,7 @@ final class GazeController {
     private void refreshReadout(long now) {
         readout.relYaw = anchored ? wrap(viewYawCache - anchorYaw) : 0f;
         readout.relPitch = anchored ? viewPitchCache - anchorPitch : 0f;
+        readout.wakeProgress = wakeProgress;
         readout.focus = focus;
         readout.charging = charging;
         readout.ready = ready;
