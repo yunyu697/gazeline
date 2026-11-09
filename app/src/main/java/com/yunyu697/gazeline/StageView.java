@@ -336,7 +336,7 @@ public class StageView extends View {
         c.drawPath(tri, p);
 
         txt(c, "打开视频", tx + 24 * dp, cy2 + 5.6f * dp, 15.5f * dp, 0xFF1A1204, tfMed, Paint.Align.LEFT);
-        txt(c, "360° / SBS 3D", openZone.right - 20 * dp, cy2 + 4.6f * dp, 12 * dp, 0xCC1A1204, tfReg, Paint.Align.RIGHT);
+        txt(c, "360° / SBS / SMB", openZone.right - 20 * dp, cy2 + 4.6f * dp, 12 * dp, 0xCC1A1204, tfReg, Paint.Align.RIGHT);
     }
 
     private void drawUndo(Canvas c) {
@@ -608,7 +608,7 @@ public class StageView extends View {
         y += 22 * dp;
         String[] lines = {
                 "控件行 pitch −18°：字幕 −30° · −10 s −16° · 播放 0° · +10 s +16° · 菜单 +30°",
-                "点播中央播放键 → 选 360 全景 / SBS 3D → 选本地视频（M2 管线）",
+                "点播中央播放键 → 选 360 全景 / SBS 3D / SMB 片库 → 本地或局域网视频（M2 管线）",
                 "回中键 (−37°, −25°) Ø7.5° · L2 1.8 s（1.2 s 充能 + 0.6 s 待发）· 随 HUD 一起显隐",
                 "唤醒条 25°×3° @ −39° · 字幕 @ −33° · 与字幕带、快退键中心距均满足 ≥ 2° 隔离"
         };

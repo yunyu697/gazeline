@@ -2,6 +2,7 @@ package com.yunyu697.gazeline;
 
 import android.content.Context;
 import android.graphics.SurfaceTexture;
+import android.media.MediaDataSource;
 import android.opengl.GLES11Ext;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
@@ -31,6 +32,10 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
 
     private final Context context;
     private final String dataSource;
+    /** SMB source, set asynchronously by {@link #setMediaSource}. */
+    private volatile MediaDataSource mediaSource;
+    /** True until an SMB connection hands over its MediaDataSource. */
+    private volatile boolean waitingForSource;
     private final boolean panorama;
     private final VideoDecoder.Listener decoderListener;
     private final AudioPlayer.Listener audioListener;
@@ -72,6 +77,31 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
         this.panorama = panorama;
         this.decoderListener = decoderListener;
         this.audioListener = audioListener;
+    }
+
+    /**
+     * SMB variant: the decoder waits until the player hands over the opened
+     * random-access source, so a slow TCP connect never blocks the GL thread.
+     */
+    StereoRenderer(Context context, MediaDataSource mediaSource, boolean panorama,
+                   VideoDecoder.Listener decoderListener, AudioPlayer.Listener audioListener) {
+        this.context = context.getApplicationContext();
+        this.dataSource = null;
+        this.mediaSource = mediaSource;
+        this.waitingForSource = mediaSource == null;
+        this.panorama = panorama;
+        this.decoderListener = decoderListener;
+        this.audioListener = audioListener;
+    }
+
+    void setMediaSource(MediaDataSource source) {
+        if (source == null) {
+            return;
+        }
+        mediaSource = source;
+        waitingForSource = false;
+        Log.i(TAG, "media source ready, starting decoder");
+        startDecoder();
     }
 
     void setRotation(float[] rowMajor3x3) {
@@ -294,12 +324,12 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
     }
 
     private void startDecoder() {
-        if (surface == null) {
+        if (surface == null || waitingForSource) {
             return;
         }
         stopDecoder();
         startAudio(audioTrackIndex, 0L);
-        decoder = new VideoDecoder(context, dataSource, surface, decoderListener, audioPlayer);
+        decoder = new VideoDecoder(context, dataSource, mediaSource, surface, decoderListener, audioPlayer);
         decoder.setSpeed(speed);
         if (!playing) {
             decoder.pause();
@@ -311,7 +341,7 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
         if (audioListener == null) {
             return;
         }
-        audioPlayer = new AudioPlayer(context, dataSource, trackIndex, startUs, audioListener);
+        audioPlayer = new AudioPlayer(context, dataSource, mediaSource, trackIndex, startUs, audioListener);
         audioPlayer.setSpeed(speed);
         if (!playing) {
             audioPlayer.pause();
@@ -335,6 +365,14 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
 
     void release() {
         stopDecoder();
+        MediaDataSource source = mediaSource;
+        mediaSource = null;
+        if (source != null) {
+            try {
+                source.close();
+            } catch (Throwable ignored) {
+            }
+        }
         if (p360 != null) {
             p360.release();
             p360 = null;

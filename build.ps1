@@ -87,7 +87,15 @@ if (Test-Path $classes) { Remove-Item $classes -Recurse -Force }
 New-Item -ItemType Directory -Force $classes | Out-Null
 $javaFiles = @(Get-ChildItem (Join-Path $src 'java\com\yunyu697\gazeline') -Filter *.java | ForEach-Object { $_.FullName })
 $javaFiles += (Join-Path $gen 'com\yunyu697\gazeline\R.java')
-& javac -encoding UTF-8 --release 11 -cp $jar -d $classes @javaFiles
+# Vendored jars live in app/libs (SMB client + its runtime dependencies).
+$libsDir = Join-Path $proj 'app\libs'
+$libJars = @()
+if (Test-Path $libsDir) {
+    $libJars = @(Get-ChildItem $libsDir -Filter *.jar | ForEach-Object { $_.FullName })
+}
+$compileCp = $jar
+if ($libJars.Count -gt 0) { $compileCp = $jar + ';' + ($libJars -join ';') }
+& javac -encoding UTF-8 --release 11 -cp $compileCp -d $classes @javaFiles
 if ($LASTEXITCODE -ne 0) { throw 'javac failed' }
 
 Write-Output '== d8 =='
@@ -100,7 +108,8 @@ $classesJar = Join-Path $out 'classes.jar'
 if (Test-Path $classesJar) { Remove-Item $classesJar -Force }
 & jar cf $classesJar -C $classes .
 if ($LASTEXITCODE -ne 0) { throw 'jar failed' }
-& (Join-Path $bt 'd8.bat') --release --min-api 26 --lib $jar --output $dexDir $classesJar
+$d8Inputs = @($classesJar) + $libJars
+& (Join-Path $bt 'd8.bat') --release --min-api 26 --lib $jar --output $dexDir @d8Inputs
 if ($LASTEXITCODE -ne 0) { throw 'd8 failed' }
 
 Write-Output '== keystore =='
@@ -120,13 +129,17 @@ foreach ($v in $variants) {
     Copy-Item $base $unsigned -Force
     $zip = [System.IO.Compression.ZipFile]::Open($unsigned, [System.IO.Compression.ZipArchiveMode]::Update)
     try {
-        $entry = $zip.CreateEntry('classes.dex', [System.IO.Compression.CompressionLevel]::Optimal)
-        $dst = $entry.Open()
-        try {
-            $dexStream = [System.IO.File]::OpenRead((Join-Path $dexDir 'classes.dex'))
-            $dexStream.CopyTo($dst)
-            $dexStream.Dispose()
-        } finally { $dst.Dispose() }
+        # D8 emits classes.dex, classes2.dex, ... once the vendored jars push
+        # the method count over the single-dex limit. Add every one of them.
+        foreach ($dexFile in (Get-ChildItem $dexDir -Filter *.dex | Sort-Object Name)) {
+            $entry = $zip.CreateEntry($dexFile.Name, [System.IO.Compression.CompressionLevel]::Optimal)
+            $dst = $entry.Open()
+            try {
+                $dexStream = [System.IO.File]::OpenRead($dexFile.FullName)
+                $dexStream.CopyTo($dst)
+                $dexStream.Dispose()
+            } finally { $dst.Dispose() }
+        }
     } finally { $zip.Dispose() }
 
     $aligned = Join-Path $out "aligned-$v.apk"

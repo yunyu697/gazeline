@@ -1,12 +1,15 @@
 package com.yunyu697.gazeline;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.media.MediaDataSource;
 import android.net.Uri;
 import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
@@ -94,6 +97,11 @@ public class PlayerActivity extends Activity
     private long wakeFadeStart = -1;
 
     private boolean playing = true;
+    private boolean smbMode;
+    private SmbMediaDataSource smbSource;
+    private boolean smbOpening;
+    private boolean smbApplied;
+    private boolean resumed;
     private boolean subtitleOn;
     private SubtitleTrack subtitleTrack;
     private String subtitleSource;
@@ -160,6 +168,7 @@ public class PlayerActivity extends Activity
         panorama = "360".equals(getIntent().getStringExtra(EXTRA_MODE));
         sensorWanted = getIntent().getBooleanExtra(EXTRA_SENSOR, true);
         startAtMs = Math.max(0L, getIntent().getLongExtra(EXTRA_POSITION, 0L));
+        smbMode = SmbSettings.isSmb(dataSource);
         videoName = displayName(dataSource);
         String subtitle = getIntent().getStringExtra(EXTRA_SUBTITLE);
         if (subtitle == null || subtitle.length() == 0) {
@@ -184,7 +193,9 @@ public class PlayerActivity extends Activity
 
         glView = new GLSurfaceView(this);
         glView.setEGLContextClientVersion(2);
-        renderer = new StereoRenderer(this, dataSource, panorama, this, this);
+        renderer = smbMode
+                ? new StereoRenderer(this, (MediaDataSource) null, panorama, this, this)
+                : new StereoRenderer(this, dataSource, panorama, this, this);
         renderer.setCalib(CalibParams.load(this));
         glView.setRenderer(renderer);
         glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
@@ -206,6 +217,10 @@ public class PlayerActivity extends Activity
         sensorPrimed = !sensorActive;
         if (!sensorActive) {
             gaze.setAnchor(viewYaw, viewPitch);
+        }
+        if (smbMode) {
+            videoFormat = "SMB · 正在连接…";
+            beginSmbOpen();
         }
     }
 
@@ -236,12 +251,18 @@ public class PlayerActivity extends Activity
         if (!sensorActive) {
             gaze.setAnchor(viewYaw, viewPitch);
         }
+        resumed = true;
+        if (smbSource != null && !smbApplied) {
+            smbApplied = true;
+            renderer.setMediaSource(smbSource);
+        }
         ui.post(tick);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
+        resumed = false;
         ui.removeCallbacks(tick);
         if (sensors != null) {
             sensors.unregisterListener(this);
@@ -254,9 +275,85 @@ public class PlayerActivity extends Activity
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (smbSource != null) {
+            smbSource.close();
+            smbSource = null;
+        }
         if (feedback != null) {
             feedback.release();
         }
+    }
+
+    /** Opens the SMB file off the UI/GL thread; playback starts when ready. */
+    private void beginSmbOpen() {
+        if (smbOpening || smbSource != null) {
+            return;
+        }
+        smbOpening = true;
+        videoFormat = "SMB · 连接中…";
+        showStatus("SMB 连接中…");
+        final SmbSettings settings = SmbSettings.load(this);
+        final String url = dataSource;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                SmbMediaDataSource opened = null;
+                String failure = null;
+                try {
+                    opened = SmbMediaDataSource.open(settings, url);
+                } catch (Throwable t) {
+                    failure = t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage();
+                }
+                final SmbMediaDataSource source = opened;
+                final String error = failure;
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        smbOpening = false;
+                        if (isFinishing() || isDestroyed()) {
+                            if (source != null) {
+                                source.close();
+                            }
+                            return;
+                        }
+                        if (source == null) {
+                            showSmbFailure(error);
+                            return;
+                        }
+                        smbSource = source;
+                        videoFormat = "SMB · " + source.label();
+                        showStatus("SMB 已连接 · " + source.label());
+                        if (resumed) {
+                            smbApplied = true;
+                            renderer.setMediaSource(source);
+                        }
+                    }
+                });
+            }
+        }, "gazeline-smb").start();
+    }
+
+    private void showSmbFailure(String message) {
+        videoFormat = "SMB · 连接失败";
+        showStatus("SMB 连接失败");
+        new AlertDialog.Builder(this)
+                .setTitle("SMB 连接失败")
+                .setMessage((message == null ? "未知错误" : message)
+                        + "\n\n请确认手机与电脑在同一网段、共享已开启、账号密码正确，且 445 端口可达。")
+                .setPositiveButton("重试", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        beginSmbOpen();
+                    }
+                })
+                .setNegativeButton("返回", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        finish();
+                    }
+                })
+                .setCancelable(false)
+                .show();
     }
 
     @Override
@@ -1066,6 +1163,10 @@ public class PlayerActivity extends Activity
     }
 
     private static String displayName(String path) {
+        if (SmbSettings.isSmb(path)) {
+            int slash = path.lastIndexOf('/');
+            return slash < 0 ? path : path.substring(slash + 1);
+        }
         if (path.startsWith("content://")) {
             try {
                 String seg = Uri.parse(path).getLastPathSegment();

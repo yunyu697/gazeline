@@ -5,6 +5,7 @@ import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioTrack;
 import android.media.MediaCodec;
+import android.media.MediaDataSource;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.net.Uri;
@@ -36,6 +37,8 @@ final class AudioPlayer implements Runnable {
 
     private final Context context;
     private final String dataSource;
+    /** Non-null for SMB sources; takes precedence over {@link #dataSource}. */
+    private final MediaDataSource mediaSource;
     private final int wantedTrack;
     private final long initialSeekUs;
     private final Listener listener;
@@ -68,8 +71,14 @@ final class AudioPlayer implements Runnable {
 
     AudioPlayer(Context context, String dataSource, int trackIndex,
                 long initialSeekUs, Listener listener) {
+        this(context, dataSource, null, trackIndex, initialSeekUs, listener);
+    }
+
+    AudioPlayer(Context context, String dataSource, MediaDataSource mediaSource, int trackIndex,
+                long initialSeekUs, Listener listener) {
         this.context = context.getApplicationContext();
         this.dataSource = dataSource;
+        this.mediaSource = mediaSource;
         this.wantedTrack = trackIndex;
         this.initialSeekUs = Math.max(0L, initialSeekUs);
         this.listener = listener;
@@ -479,7 +488,9 @@ final class AudioPlayer implements Runnable {
     }
 
     private void openSource(MediaExtractor extractor) throws Exception {
-        if (dataSource.startsWith("content://") || dataSource.startsWith("file://")) {
+        if (mediaSource != null) {
+            extractor.setDataSource(mediaSource);
+        } else if (dataSource.startsWith("content://") || dataSource.startsWith("file://")) {
             extractor.setDataSource(context, Uri.parse(dataSource), null);
         } else {
             extractor.setDataSource(dataSource);

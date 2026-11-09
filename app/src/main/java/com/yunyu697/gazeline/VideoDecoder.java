@@ -4,6 +4,7 @@ import android.content.Context;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
+import android.media.MediaDataSource;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.net.Uri;
@@ -34,6 +35,8 @@ final class VideoDecoder implements Runnable {
 
     private final Context context;
     private final String dataSource;
+    /** Non-null for SMB sources; takes precedence over {@link #dataSource}. */
+    private final MediaDataSource mediaSource;
     private final Surface surface;
     private final Listener listener;
     /** Master clock while it has sound; null-safe and may report -1 at any time. */
@@ -60,8 +63,14 @@ final class VideoDecoder implements Runnable {
 
     VideoDecoder(Context context, String dataSource, Surface surface, Listener listener,
                  AudioPlayer audio) {
+        this(context, dataSource, null, surface, listener, audio);
+    }
+
+    VideoDecoder(Context context, String dataSource, MediaDataSource mediaSource, Surface surface,
+                 Listener listener, AudioPlayer audio) {
         this.context = context.getApplicationContext();
         this.dataSource = dataSource;
+        this.mediaSource = mediaSource;
         this.surface = surface;
         this.listener = listener;
         this.audio = audio;
@@ -210,7 +219,9 @@ final class VideoDecoder implements Runnable {
     }
 
     private void openSource(MediaExtractor extractor) throws Exception {
-        if (dataSource.startsWith("content://") || dataSource.startsWith("file://")) {
+        if (mediaSource != null) {
+            extractor.setDataSource(mediaSource);
+        } else if (dataSource.startsWith("content://") || dataSource.startsWith("file://")) {
             extractor.setDataSource(context, Uri.parse(dataSource), null);
         } else {
             extractor.setDataSource(dataSource);

@@ -4,9 +4,9 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 
 **品牌决定：品牌名仅 `Gazeline`，无中文名。** launcher label、启动页、关于页、商店标题只出现 `Gazeline`。商店标题为 `Gazeline · Cardboard VR Player`，品类词只放副标题与描述。
 
-已知限制：launcher label 是 8 个拉丁字母，默认 4 列图标网格可完整显示；大字体或 5 列网格下可能被省略号截断。不通过缩小字号或改名规避。
+已知限制：launcher label 是 8 个拉丁字母，默认 4 列图标网格可完整显示；大字体或 5 列网格下可能被省略号截断。不通过缩小字号或改名规避。SMB 需要 `INTERNET` 权限、手机与电脑同一网段、TCP 445 可达；Windows 侧需开启 SMB2/3 与账号密码（Guest/空会话默认不可用）。
 
-> 当前为 alpha 阶段（版本号以 `version.txt` 为准）：本地视频播放、音轨播放、外挂 SRT/VTT 字幕、凝视控制与 S5 两段式校准（步进 / 保存 / 回滚）是真实功能；校准参数对画面几何的影响、SMB 与真机 72 Hz 仍待后续版本或真机验证。
+> 当前为 alpha 阶段（版本号以 `version.txt` 为准）：本地视频播放、音轨播放、外挂 SRT/VTT 字幕、SMB2/3 片库（配置与客户端）、凝视控制与 S5 两段式校准（步进 / 保存 / 回滚）是真实功能；校准参数对画面几何的影响、SMB 的列表/串流（本机无可用账号，未实测）与真机 72 Hz 仍待真机验证。
 
 ## 当前完成度
 
@@ -35,6 +35,7 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 | 字幕（alpha10） | 手机端选片后可选同名 `.srt` / `.vtt` 字幕（也可跳过）；`SubtitleTrack` 解析时间轴，按解码位置取当前 cue，`HudView` 在字幕带 @-33° 按左右眼各绘一份，最多 2 行、超宽自动换行+省略；字幕是内容层，HUD 淡出后仍保留；无字幕文件时保持原「暂无字幕轨」提示 |
 | 显示刷新（alpha11） | 进播放器时通过 `WindowManager.LayoutParams.preferredDisplayModeId` 请求 72 Hz（同分辨率优先，90 Hz 兜底）；手机不暴露这些模式时保持系统模式，HUD 顶部状态提示实际结果（模拟器实测为 60 Hz 兜底）；GL 连续渲染跟随显示 vsync |
 | 音轨播放（alpha9） | 同一来源的音频轨（第 1 条，可循环切换）→ MediaCodec AAC/其他 → `AudioTrack` 44.1/48 kHz 流式播放；音频播放头作为主时钟，视频按帧 PTS 追音频；暂停/恢复/跳转同时作用于两轨；文件无音轨时静默、不报错，菜单音轨行显示「无」 |
+| SMB 片库（alpha12） | 手机端「SMB 配置」填服务器 / 共享 / 起始目录 / 账号 / 密码（仅存本机），「SMB 片库」浏览目录与视频（显示大小）；选中视频后选 360 / SBS 再进播放器。客户端走 SMB2/3 且强制签名（smbj），文件用 `MediaDataSource` 随机读直读、不整片缓存；连接失败在手机端与播放器内都有「重试 / 配置 / 返回」提示 |
 | 调试 HUD | 文件名 / 格式 / 分辨率 / 进度 / 实际 codec 写在顶部两枚状态卡片，不再单独占用一行 |
 
 **里程碑 2/3 实测（模拟器，2026-11-08/09）**
@@ -54,6 +55,7 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 - 音轨切换、倍速静音与暂停/恢复的音频侧：代码路径与视频共用 `renderer.pause/resume/seek/setSpeed`，但模拟器上用拖拽把视点精确停到菜单/暂停键的成功率不稳定，**未实测**（见下）。
 - 字幕（alpha10，模拟器）：视频旁放同名 `test_av_2audio.srt`（含单行、双行、循环末尾三类 cue），启动后自动探测并默认开启；2 s 截图显示第一段中文 cue，5 s 截图显示第二段双行 cue（两行都在字幕带内、左右眼各一份），循环回 0 后再次出现；无字幕文件时不加载、无错误提示。字幕开关的凝视点击（HUD 字幕键 / 菜单字幕行）**未实测**，默认开启已覆盖主要观看路径。
 - 72 Hz（alpha11，模拟器）：`GazelineDisplay: no 72/90Hz mode exposed, keep 60.000004Hz 1080x2400`，启动状态提示「显示 60 Hz · 本机未暴露 72/90 Hz」，视频与字幕照常播放；真机 72/90 Hz 模式的实际切换**未实测**。
+- SMB（alpha12，模拟器）：手机端「片源 → SMB 配置」表单可填写并保存（重开对话框回显 10.0.2.2 / Data1 / test / 密码）；「SMB 片库」对宿主 Windows 的真实 SMB 服务完成了 SMB2/3 协商与 NTLM 认证，返回 `STATUS_LOGON_FAILURE (0xc000006d)`（测试账号无效），说明签名与认证链路可用；手机端「重试 / 配置 / 取消」与播放器内 `smb://` 连接失败的「重试 / 返回」弹窗均已实测。**目录列表、串流播放与带宽未实测**：本机 Guest 关闭、NullSessionShares 为空，缺少有效账号（§4.1.2 的退化档 D2 本地直读仍是当前可演示路径）。
 
 **未实现（不要在演示中当成可用功能）：**
 
@@ -61,7 +63,8 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 - 字幕样式定制（字号、颜色、背景、延迟偏移、每眼位置）与内容 URI 的同名自动探测（现在需在手机端显式选字幕，或给纯文件路径放同名 sidecar）；退出后续播（撤销条）不保留字幕选择
 - 倍速下的音频变速：0.5–2.0× 时音轨静音（占位）；回到 1.0× 重新对齐视频位置
 - 音轨切换/暂停/恢复的音频侧未在模拟器实测；真机耳机输出与延迟未验
-- SMB 串流、关于页
+- SMB 片库的目录列表、串流播放与带宽（客户端已接、无有效账号；凭据以明文存于应用私有 SharedPreferences）；SMB 仅单服务器单共享，无自动发现
+- 关于页
 - 72 Hz 真机验证（模拟器只暴露 60 Hz；已在 72/90 Hz 的手机上自动请求，未实测切换结果）
 - 长时间耐力测试
 - 校准参数的**画面侧效果**（IPD→SBS 窗口偏移、每眼 Y 偏移）只做到每帧下发 uniform；模拟器无法打开视频源核对，真机待验
@@ -74,9 +77,10 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 
 依赖：
 
-- JDK 17（`javac` / `keytool` 在 PATH）
+- JDK 17（`javac` / `keytool` / `jar` 在 PATH）
 - Android SDK：`platforms;android-35`、`build-tools;35.0.0`
 - PowerShell 5.1 或 7+
+- `app/libs/` 内的 5 个 vendored jar（smbj 0.15.0 + asn-one + slf4j-api + mbassador + bcprov-jdk18on），随仓库提交，`javac`/`d8` 都会读取；无需 Gradle/Maven
 
 ```powershell
 $env:ANDROID_SDK_ROOT = 'C:\path\to\sdk'
@@ -98,7 +102,7 @@ debug 变体改过包名，**会与正式版并存**，不会覆盖它；GitHub 
 2. 只安装 `gazeline-<version>-release.apk`：`adb install -r build/gazeline-<version>-release.apk`，或直接把 APK 传到手机点安装。
 3. 启动页最下方实时显示已安装的 `versionName`（如 `v1.0.0-alphaN`）；如果显示的不是你要的版本，说明点开的是另一个安装（见下）。
 4. 启动后 1.7 s 自动从字标进入 HUD 预览；底部三个按钮切换页面。
-5. 点琥珀色「打开视频」→ 选 360 / SBS → 系统文件选择器选片 → 可选「选择字幕 / 跳过」→ 进入播放器。播放器内：有 Rotation Vector 时转头控制视线，没有时拖拽模拟；把控件移到视点中心并停留即可充能，移开或按返回键取消。
+5. 点琥珀色「打开视频」→ 选片源：本地 360 / 本地 SBS / SMB 片库 / SMB 配置。本地片源接系统文件选择器；SMB 先填服务器、共享、账号密码再浏览片库（选视频后再选 360 / SBS）。随后可选「选择字幕 / 跳过」→ 进入播放器。播放器内：有 Rotation Vector 时转头控制视线，没有时拖拽模拟；把控件移到视点中心并停留即可充能，移开或按返回键取消。
 
 ### 装完还是旧界面 / 旧图标？
 
@@ -151,10 +155,14 @@ app/src/main/java/com/yunyu697/gazeline/
   VideoDecoder.java      MediaCodec 解码线程：暂停、跳转、循环
   AudioPlayer.java       音频轨解码 → AudioTrack：AudioTrack 播放头作主时钟、暂停/跳转/循环
   SubtitleTrack.java     SRT/VTT 解析、按位置取 cue、同名 sidecar 探测
+  SmbSettings.java       手机端 SMB 端点配置（服务器/共享/目录/账号/密码，SharedPreferences）
+  SmbConnection.java     SMB2/3 连接（强制签名）、目录列表、按路径打开文件
+  SmbMediaDataSource.java 把 SMB 文件包装成随机读 MediaDataSource，供双解码器直读
   DisplayModes.java      请求 72 Hz / 90 Hz 同分辨率显示模式，其他保持系统模式
   StereoRenderer.java    GL 双视口渲染与画面冻结
   Projection360.java     360° 管线
   ProjectionSbs.java     SBS 管线
 app/src/main/res/...
+app/libs/                 smbj 与运行时依赖（vendored jar）
 build.ps1 / version-lib.ps1 / version-check.ps1 / version.txt
 ```
