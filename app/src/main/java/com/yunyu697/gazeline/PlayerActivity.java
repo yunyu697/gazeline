@@ -41,15 +41,22 @@ public class PlayerActivity extends Activity
     static final String EXTRA_SENSOR = "sensor";
     static final String EXTRA_POSITION = "position";
     static final String EXTRA_SUBTITLE = "subtitle";
+    static final String EXTRA_BROWSE = "browse";
 
     private static final int OVERLAY_NONE = 0;
     private static final int OVERLAY_MENU = 1;
     private static final int OVERLAY_CONFIRM = 2;
+    private static final int OVERLAY_BROWSER = 3;
+
+    private static final long HISTORY_EVERY_MS = 5000L;
 
     private static final int REC_IDLE = 0;
-    private static final int REC_MASK_IN = 1;
-    private static final int REC_ROTATE = 2;
+    private static final int REC_COUNTDOWN = 1;
+    private static final int REC_MASK_IN = 2;
     private static final int REC_MASK_OUT = 3;
+
+    /** Grace window after the gaze trigger: turn back to a comfortable pose. */
+    private static final long RECENTER_GRACE_MS = 3500;
 
     private GLSurfaceView glView;
     private StereoRenderer renderer;
@@ -102,6 +109,8 @@ public class PlayerActivity extends Activity
     private boolean smbOpening;
     private boolean smbApplied;
     private boolean resumed;
+    private boolean browserOnly;
+    private long lastHistoryMs;
     private boolean subtitleOn;
     private SubtitleTrack subtitleTrack;
     private String subtitleSource;
@@ -124,14 +133,27 @@ public class PlayerActivity extends Activity
     private boolean startSeekApplied;
     private boolean exiting;
 
-    // recenter animation
+    // in-VR file browser (SMB), same configuration as the phone library
+    private String browserDir = "";
+    private boolean browserLoading;
+    private String browserHint = "";
+    private int browserPage;
+    private int browserPages = 1;
+    private int browserGen;
+    private final java.util.List<HudSpec.Target> browserTargets = new java.util.ArrayList<>();
+    private final java.util.List<BrowserRow> browserRows = new java.util.ArrayList<>();
+
+    static final class BrowserRow {
+        String title = "";
+        String detail = "";
+        String path = "";
+        int kind;
+    }
+
+    // recenter: grace countdown, then a short mask while the correction lands
     private int recPhase = REC_IDLE;
     private long recPhaseStart;
-    private long recDurationMs;
-    private float recTotalYaw;
-    private float recTotalPitch;
-    private float recBaseWorldYaw;
-    private float recBaseWorldPitch;
+    private float recCountdown;
     private float maskAlpha;
     private float flashAlpha;
     private long flashStart;
@@ -160,21 +182,27 @@ public class PlayerActivity extends Activity
         displayMode = DisplayModes.request(this);
 
         dataSource = getIntent().getStringExtra(EXTRA_PATH);
+        boolean browseRequest = getIntent().getBooleanExtra(EXTRA_BROWSE, false);
         if (dataSource == null || dataSource.length() == 0) {
-            Toast.makeText(this, "未指定视频文件", Toast.LENGTH_SHORT).show();
-            finish();
-            return;
+            if (!browseRequest) {
+                Toast.makeText(this, "未指定视频文件", Toast.LENGTH_SHORT).show();
+                finish();
+                return;
+            }
+            browserOnly = true;
+            dataSource = "";
+            playing = false;
         }
         panorama = "360".equals(getIntent().getStringExtra(EXTRA_MODE));
         sensorWanted = getIntent().getBooleanExtra(EXTRA_SENSOR, true);
         startAtMs = Math.max(0L, getIntent().getLongExtra(EXTRA_POSITION, 0L));
-        smbMode = SmbSettings.isSmb(dataSource);
-        videoName = displayName(dataSource);
+        smbMode = !browserOnly && SmbSettings.isSmb(dataSource);
+        videoName = browserOnly ? "片库" : displayName(dataSource);
         String subtitle = getIntent().getStringExtra(EXTRA_SUBTITLE);
-        if (subtitle == null || subtitle.length() == 0) {
+        if (!browserOnly && (subtitle == null || subtitle.length() == 0)) {
             subtitle = SubtitleTrack.findSidecar(dataSource);
         }
-        if (subtitle != null && subtitle.length() > 0) {
+        if (!browserOnly && subtitle != null && subtitle.length() > 0) {
             loadSubtitle(subtitle);
         }
 
@@ -191,28 +219,34 @@ public class PlayerActivity extends Activity
         menuGaze = new GazeController(this);
         menuGaze.setLayer(HudSpec.MENU_ROWS, null, false);
 
-        glView = new GLSurfaceView(this);
-        glView.setEGLContextClientVersion(2);
-        renderer = smbMode
-                ? new StereoRenderer(this, (MediaDataSource) null, panorama, this, this)
-                : new StereoRenderer(this, dataSource, panorama, this, this);
-        renderer.setCalib(CalibParams.load(this));
-        glView.setRenderer(renderer);
-        glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
+        if (!browserOnly) {
+            glView = new GLSurfaceView(this);
+            glView.setEGLContextClientVersion(2);
+            renderer = smbMode
+                    ? new StereoRenderer(this, (MediaDataSource) null, panorama, this, this)
+                    : new StereoRenderer(this, dataSource, panorama, this, this);
+            renderer.setCalib(CalibParams.load(this));
+            glView.setRenderer(renderer);
+            glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
+        }
 
         hud = new HudView(this);
         hud.setListener(this);
 
         FrameLayout root = new FrameLayout(this);
-        root.addView(glView, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        if (glView != null) {
+            root.addView(glView, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        } else {
+            root.setBackgroundColor(0xFF05070A);
+        }
         root.addView(hud, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
 
         sessionStartMs = SystemClock.elapsedRealtime();
         lastActivityMs = sessionStartMs;
-        showStatus("显示 " + displayMode);
+        showStatus(browserOnly ? "片库 · 凝视选择" : "显示 " + displayMode);
         updateRotation();
         sensorPrimed = !sensorActive;
         if (!sensorActive) {
@@ -227,13 +261,17 @@ public class PlayerActivity extends Activity
     @Override
     protected void onResume() {
         super.onResume();
-        glView.onResume();
-        renderer.setFreeze(false);
-        renderer.setCalib(CalibParams.load(this));
-        renderer.restartDecoder();
-        renderer.setSpeed(playbackRate);
-        if (!playing) {
-            renderer.pausePlayback();
+        if (glView != null) {
+            glView.onResume();
+        }
+        if (renderer != null) {
+            renderer.setFreeze(false);
+            renderer.setCalib(CalibParams.load(this));
+            renderer.restartDecoder();
+            renderer.setSpeed(playbackRate);
+            if (!playing) {
+                renderer.pausePlayback();
+            }
         }
         if (sensorActive) {
             sensors.registerListener(this, rotationSensor, SensorManager.SENSOR_DELAY_GAME);
@@ -252,9 +290,12 @@ public class PlayerActivity extends Activity
             gaze.setAnchor(viewYaw, viewPitch);
         }
         resumed = true;
-        if (smbSource != null && !smbApplied) {
+        if (smbSource != null && !smbApplied && renderer != null) {
             smbApplied = true;
             renderer.setMediaSource(smbSource);
+        }
+        if (browserOnly) {
+            openBrowser();
         }
         ui.post(tick);
     }
@@ -263,13 +304,18 @@ public class PlayerActivity extends Activity
     protected void onPause() {
         super.onPause();
         resumed = false;
+        recordProgress();
         ui.removeCallbacks(tick);
         if (sensors != null) {
             sensors.unregisterListener(this);
         }
-        renderer.setFreeze(false);
-        renderer.stopDecoder();
-        glView.onPause();
+        if (renderer != null) {
+            renderer.setFreeze(false);
+            renderer.stopDecoder();
+        }
+        if (glView != null) {
+            glView.onPause();
+        }
     }
 
     @Override
@@ -282,6 +328,24 @@ public class PlayerActivity extends Activity
         if (feedback != null) {
             feedback.release();
         }
+    }
+
+    /** Persists the watch position so phone and VR share one resume point. */
+    private void recordProgress() {
+        if (browserOnly || dataSource == null || dataSource.length() == 0) {
+            return;
+        }
+        VideoDecoder d = renderer == null ? null : renderer.decoder();
+        if (d == null) {
+            return;
+        }
+        long position = d.positionMs();
+        if (position <= 0L) {
+            return;
+        }
+        PlayHistory.record(this, dataSource, stripExtension(videoName),
+                panorama ? "360" : "sbs", position, d.durationMs());
+        lastHistoryMs = SystemClock.elapsedRealtime();
     }
 
     /** Opens the SMB file off the UI/GL thread; playback starts when ready. */
@@ -367,6 +431,14 @@ public class PlayerActivity extends Activity
             closeOverlay("已取消退出");
             return;
         }
+        if (overlay == OVERLAY_BROWSER) {
+            if (browserOnly) {
+                finish();
+            } else {
+                closeOverlay("已关闭文件管理");
+            }
+            return;
+        }
         if (gaze.cancelByKey(now)) {
             lastActivityMs = now;
             return;
@@ -406,6 +478,10 @@ public class PlayerActivity extends Activity
         prevTickMs = now;
 
         updateRecenter(now);
+
+        if (!browserOnly && now - lastHistoryMs >= HISTORY_EVERY_MS) {
+            recordProgress();
+        }
 
         float hudAlpha = computeHudAlpha(now);
         boolean controlsShown = !playing || hudAlpha >= 0.45f;
@@ -477,6 +553,11 @@ public class PlayerActivity extends Activity
 
         GazeController.Readout mg = menuGaze.readout();
         boolean counting = mg.focus != null;
+        if (overlay == OVERLAY_BROWSER) {
+            // The file browser stays up until 关闭/返回; browsing means looking
+            // around the room, so leaving the panel must not close it.
+            return;
+        }
         if (counting) {
             menuLeaveSince = 0;
         } else {
@@ -571,15 +652,15 @@ public class PlayerActivity extends Activity
     }
 
     private void buildFrame(long now, float hudAlpha, float wakeAlpha) {
-        AudioPlayer audio = renderer.audioPlayer();
-        frame.title = stripExtension(videoName);
+        AudioPlayer audio = renderer == null ? null : renderer.audioPlayer();
+        frame.title = browserOnly ? "片库" : stripExtension(videoName);
         String audioSuffix = "";
         if (audio != null && audio.hasTrack()) {
             audioSuffix = audio.isMuted() ? " · 静音" : " · 有声";
         }
-        frame.format = videoFormat + audioSuffix;
+        frame.format = browserOnly ? "SMB · 凝视文件管理" : videoFormat + audioSuffix;
         String cue = "";
-        VideoDecoder vd = renderer.decoder();
+        VideoDecoder vd = renderer == null ? null : renderer.decoder();
         if (subtitleOn && subtitleTrack != null && vd != null) {
             cue = subtitleTrack.textAt(vd.positionMs());
         }
@@ -599,21 +680,29 @@ public class PlayerActivity extends Activity
             frame.audioValue = (audio.trackIndex() + 1) + "/" + audio.trackCount();
             frame.audioText = audio.summary() + (audio.isMuted() ? " · 倍速静音" : " · 有声");
         }
-        VideoDecoder d = renderer.decoder();
+        VideoDecoder d = renderer == null ? null : renderer.decoder();
         frame.positionMs = d == null ? 0 : d.positionMs();
         frame.durationMs = d == null ? 0 : d.durationMs();
+        frame.browserTargets = browserTargets.toArray(new HudSpec.Target[0]);
+        frame.browserPath = browserPathText();
+        frame.browserHint = browserHint;
+        frame.browserPage = browserPage;
+        frame.browserPages = browserPages;
+        frame.browserLoading = browserLoading;
+        frame.browserGen = browserGen;
         frame.gaze = gaze.readout();
         frame.hudAlpha = hudAlpha;
         frame.wakeAlpha = wakeAlpha;
         frame.maskAlpha = maskAlpha;
         frame.flashAlpha = flashAlpha;
+        frame.recenterCountdown = recPhase == REC_COUNTDOWN ? recCountdown : 0f;
 
         frame.overlay = overlay;
         frame.overlayAlpha = overlayAlpha;
         frame.overlayGaze = menuGaze.readout();
         frame.overlayHint = overlayHint;
         frame.speed = playbackRate;
-        frame.defaultFocusHint = overlay != OVERLAY_NONE
+        frame.defaultFocusHint = overlay != OVERLAY_BROWSER
                 && menuGaze.readout().focus == null
                 && now - overlayStart < HudSpec.MENU_PROTECT_MS;
         frame.menuWarn = overlay == OVERLAY_MENU
@@ -681,6 +770,16 @@ public class PlayerActivity extends Activity
             case MENU_SPEED:
                 cycleSpeed();
                 break;
+            case MENU_FILE:
+                openBrowser();
+                break;
+            case BROWSER_ITEM:
+            case BROWSER_PREV:
+            case BROWSER_NEXT:
+            case BROWSER_MODE:
+            case BROWSER_CLOSE:
+                handleBrowserTarget(target);
+                break;
             case MENU_EXIT:
                 openConfirm();
                 break;
@@ -689,7 +788,7 @@ public class PlayerActivity extends Activity
                 break;
             case EXIT_OK:
                 feedback.confirm();
-                exitPlayback(renderer.decoder());
+                exitPlayback(renderer == null ? null : renderer.decoder());
                 break;
             default:
                 break;
@@ -843,72 +942,53 @@ public class PlayerActivity extends Activity
 
     // ------------------------------------------------------------- recenter
 
+    /**
+     * Gaze triggers the action; the user then gets a grace window to settle into
+     * a comfortable pose. When it expires, whatever direction the head is
+     * pointing at that moment becomes the new forward — no forced rotation.
+     */
     private void startRecenter() {
         if (recPhase != REC_IDLE) {
             return;
         }
         long now = SystemClock.elapsedRealtime();
-        updateRotation();
-        recBaseWorldYaw = worldYaw;
-        recBaseWorldPitch = worldPitch;
-        recTotalYaw = -viewYaw;
-        recTotalPitch = -viewPitch;
-        float max = Math.max(Math.abs(recTotalYaw), Math.abs(recTotalPitch));
-        recDurationMs = (long) Math.min(300f, Math.max(140f, max / 180f * 1000f + 60f));
-        recPhase = REC_MASK_IN;
+        recPhase = REC_COUNTDOWN;
         recPhaseStart = now;
+        recCountdown = RECENTER_GRACE_MS / 1000f;
         maskAlpha = 0f;
         flashAlpha = 0f;
-        renderer.setFreeze(true);
         lastActivityMs = now;
+        showStatus("请调整姿态 · 随后按当前朝向回中");
     }
 
     private void updateRecenter(long now) {
         switch (recPhase) {
-            case REC_MASK_IN: {
-                float t = (now - recPhaseStart) / 110f;
-                if (t >= 1f) {
-                    maskAlpha = 0.8f;
-                    recPhase = REC_ROTATE;
+            case REC_COUNTDOWN: {
+                float left = RECENTER_GRACE_MS - (now - recPhaseStart);
+                recCountdown = Math.max(0f, left / 1000f);
+                if (left <= 0f) {
+                    recCountdown = 0f;
+                    recPhase = REC_MASK_IN;
                     recPhaseStart = now;
-                } else {
-                    maskAlpha = 0.8f * Math.max(0f, t);
+                    feedback.confirm();
                 }
                 break;
             }
-            case REC_ROTATE: {
-                maskAlpha = 0.8f;
-                float f = (now - recPhaseStart) / (float) recDurationMs;
-                boolean timeout = now - recPhaseStart > 600;
-                if (f > 1f) {
-                    f = 1f;
-                }
-                float ease = f * f * (3f - 2f * f);
-                float targetYaw = recBaseWorldYaw + recTotalYaw * ease;
-                float targetPitch = recBaseWorldPitch + recTotalPitch * ease;
-                float stepY = clamp(targetYaw - worldYaw, -2.5f, 2.5f);
-                float stepP = clamp(targetPitch - worldPitch, -2.5f, 2.5f);
-                worldYaw += stepY;
-                worldPitch += stepP;
-                updateRotation();
-                boolean done = (f >= 1f && Math.abs(targetYaw - worldYaw) < 0.15f
-                        && Math.abs(targetPitch - worldPitch) < 0.15f) || timeout;
-                if (done) {
-                    worldYaw = targetYaw;
-                    worldPitch = targetPitch;
-                    updateRotation();
+            case REC_MASK_IN: {
+                float t = (now - recPhaseStart) / 110f;
+                maskAlpha = 0.8f * Math.max(0f, Math.min(1f, t));
+                if (t >= 1f) {
+                    applyRecenter();
                     maskAlpha = 0.8f;
                     recPhase = REC_MASK_OUT;
                     recPhaseStart = now;
                     flashStart = now;
                     flashAlpha = 1f;
-                    renderer.setFreeze(false);
-                    feedback.confirm();
                 }
                 break;
             }
             case REC_MASK_OUT: {
-                float t = (now - recPhaseStart) / 120f;
+                float t = (now - recPhaseStart) / 140f;
                 maskAlpha = 0.8f * Math.max(0f, 1f - t);
                 if (t >= 1f) {
                     finishRecenter(now, false);
@@ -929,11 +1009,19 @@ public class PlayerActivity extends Activity
         }
     }
 
+    /** Bakes the current head direction in as forward, behind the short mask. */
+    private void applyRecenter() {
+        updateRotation();
+        worldYaw = GazeController.wrap(worldYaw - viewYaw);
+        worldPitch = clamp(worldPitch - viewPitch, -80f, 80f);
+        updateRotation();
+    }
+
     private void finishRecenter(long now, boolean interrupted) {
         recPhase = REC_IDLE;
+        recCountdown = 0f;
         maskAlpha = 0f;
         flashAlpha = 0f;
-        renderer.setFreeze(false);
         updateRotation();
         gaze.setAnchor(viewYaw, viewPitch);
         gaze.onHudOpened(now);
@@ -943,6 +1031,283 @@ public class PlayerActivity extends Activity
         } else {
             showStatus("已回中");
         }
+    }
+
+    // ------------------------------------------------------------- VR browser
+
+    private static final int BROW_KIND_DIR = 1;
+    private static final int BROW_KIND_VIDEO = 2;
+    private static final int BROW_KIND_FAV = 3;
+    private static final int BROWSER_PAGE_SIZE = 5;
+
+    private void openBrowser() {
+        SmbSettings settings = SmbSettings.load(this);
+        long now = SystemClock.elapsedRealtime();
+        overlay = OVERLAY_BROWSER;
+        overlayStart = now;
+        overlayAlpha = 0f;
+        overlayHint = "";
+        overlayHintUntil = 0;
+        menuOpenedAt = now;
+        menuLeaveSince = 0;
+        browserDir = SmbFavorites.normalize(settings.path);
+        browserPage = 0;
+        browserPages = 1;
+        browserRows.clear();
+        browserTargets.clear();
+        browserHint = "";
+        browserLoading = settings.isConfigured();
+        menuGaze.setAnchor(viewYaw, viewPitch);
+        menuGaze.onHudOpened(now);
+        menuGaze.protect(now, 500);
+        feedback.menuOpen();
+        lastActivityMs = now;
+        if (!settings.isConfigured()) {
+            browserLoading = false;
+            browserHint = "请先在手机端完成 SMB 配置";
+            rebuildBrowser();
+            return;
+        }
+        loadBrowserDir(settings, browserDir);
+    }
+
+    private void loadBrowserDir(final SmbSettings settings, final String target) {
+        final String dir = SmbFavorites.normalize(target);
+        browserDir = dir;
+        browserPage = 0;
+        browserLoading = true;
+        browserHint = "";
+        browserRows.clear();
+        rebuildBrowser();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                java.util.List<SmbConnection.Entry> entries = null;
+                try {
+                    SmbConnection conn = SmbConnection.connect(settings.host, settings.port,
+                            settings.share, settings.user, settings.password);
+                    try {
+                        entries = conn.list(dir);
+                    } finally {
+                        conn.close();
+                    }
+                } catch (Throwable ignored) {
+                    // handled below: a null list shows the failure hint
+                }
+                final java.util.List<SmbConnection.Entry> result = entries;
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isFinishing() || isDestroyed() || overlay != OVERLAY_BROWSER) {
+                            return;
+                        }
+                        browserLoading = false;
+                        if (result == null) {
+                            browserHint = "连接失败 · 检查网段 / 445 / 账号";
+                            browserRows.clear();
+                        } else {
+                            buildBrowserRows(settings, result);
+                        }
+                        rebuildBrowser();
+                    }
+                });
+            }
+        }, "gazeline-vr-browser").start();
+    }
+
+    private void buildBrowserRows(SmbSettings settings, java.util.List<SmbConnection.Entry> entries) {
+        browserRows.clear();
+        String root = SmbFavorites.normalize(settings.path);
+        if (browserDir.equals(root)) {
+            for (String fav : SmbFavorites.list(this)) {
+                if (fav.length() == 0) {
+                    continue;
+                }
+                BrowserRow r = new BrowserRow();
+                r.kind = BROW_KIND_FAV;
+                r.path = fav;
+                r.title = "★ " + SmbFavorites.displayName(fav);
+                r.detail = "收藏";
+                browserRows.add(r);
+            }
+        }
+        if (browserDir.length() > 0) {
+            BrowserRow r = new BrowserRow();
+            r.kind = BROW_KIND_DIR;
+            r.path = parentOf(browserDir);
+            r.title = ".. 上一级";
+            r.detail = r.path.length() == 0 ? settings.share : settings.share + "/" + r.path;
+            browserRows.add(r);
+        }
+        for (SmbConnection.Entry e : entries) {
+            if (!e.directory) {
+                continue;
+            }
+            BrowserRow r = new BrowserRow();
+            r.kind = BROW_KIND_DIR;
+            r.path = e.path;
+            r.title = e.name;
+            r.detail = "目录";
+            browserRows.add(r);
+        }
+        for (SmbConnection.Entry e : entries) {
+            if (e.directory || !playable(e.name)) {
+                continue;
+            }
+            BrowserRow r = new BrowserRow();
+            r.kind = BROW_KIND_VIDEO;
+            r.path = e.path;
+            r.title = e.name;
+            String detail = sizeText(e.size);
+            PlayHistory.Entry h = PlayHistory.find(this, settings.url(e.path));
+            if (h != null && h.resumable()) {
+                detail = (detail.length() == 0 ? "" : detail + " · ")
+                        + "继续 " + timeText(h.positionMs);
+            }
+            r.detail = detail.length() == 0 ? "视频" : detail;
+            browserRows.add(r);
+        }
+    }
+
+    private void rebuildBrowser() {
+        browserTargets.clear();
+        int size = browserRows.size();
+        browserPages = Math.max(1, (size + BROWSER_PAGE_SIZE - 1) / BROWSER_PAGE_SIZE);
+        if (browserPage >= browserPages) {
+            browserPage = browserPages - 1;
+        }
+        if (browserPage < 0) {
+            browserPage = 0;
+        }
+        int start = browserPage * BROWSER_PAGE_SIZE;
+        for (int slot = 0; slot < BROWSER_PAGE_SIZE; slot++) {
+            int index = start + slot;
+            if (index >= size) {
+                break;
+            }
+            BrowserRow r = browserRows.get(index);
+            browserTargets.add(HudSpec.browserRow(HudSpec.BROWSER_ROW_PITCH[slot],
+                    r.title, r.detail, index));
+        }
+        browserTargets.add(HudSpec.BROWSER_PREV_T);
+        browserTargets.add(HudSpec.BROWSER_NEXT_T);
+        SmbSettings settings = SmbSettings.load(this);
+        browserTargets.add(HudSpec.browserMode(
+                "360".equals(settings.projection) ? "360°" : "SBS"));
+        browserTargets.add(HudSpec.BROWSER_CLOSE_T);
+        menuGaze.setLayer(browserTargets.toArray(new HudSpec.Target[0]), null, false);
+        menuGaze.protect(SystemClock.elapsedRealtime(), 260);
+        browserGen++;
+    }
+
+    private void handleBrowserTarget(HudSpec.Target t) {
+        switch (t.id) {
+            case BROWSER_ITEM: {
+                if (t.index < 0 || t.index >= browserRows.size()) {
+                    return;
+                }
+                BrowserRow row = browserRows.get(t.index);
+                if (row.kind == BROW_KIND_VIDEO) {
+                    playFromBrowser(row);
+                } else {
+                    browserHint = "";
+                    loadBrowserDir(SmbSettings.load(this), row.path);
+                }
+                break;
+            }
+            case BROWSER_PREV:
+                if (browserPage > 0) {
+                    browserPage--;
+                    rebuildBrowser();
+                }
+                break;
+            case BROWSER_NEXT:
+                if (browserPage + 1 < browserPages) {
+                    browserPage++;
+                    rebuildBrowser();
+                }
+                break;
+            case BROWSER_MODE: {
+                SmbSettings settings = SmbSettings.load(this);
+                settings.projection = "360".equals(settings.projection) ? "sbs" : "360";
+                settings.save(this);
+                browserHint = "投影已切换为 " + ("360".equals(settings.projection)
+                        ? "360°" : "SBS");
+                rebuildBrowser();
+                break;
+            }
+            case BROWSER_CLOSE:
+                if (browserOnly) {
+                    finish();
+                } else {
+                    closeOverlay("已关闭文件管理");
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    private void playFromBrowser(BrowserRow row) {
+        SmbSettings settings = SmbSettings.load(this);
+        String source = settings.url(row.path);
+        recordProgress();
+        String mode = "360".equals(settings.projection) ? "360" : "sbs";
+        Intent play = new Intent(this, PlayerActivity.class);
+        play.putExtra(EXTRA_PATH, source);
+        play.putExtra(EXTRA_MODE, mode);
+        play.putExtra(EXTRA_SENSOR, sensorWanted);
+        long resume = PlayHistory.positionFor(this, source);
+        if (resume > 0) {
+            play.putExtra(EXTRA_POSITION, resume);
+        }
+        startActivity(play);
+        finish();
+    }
+
+    private String browserPathText() {
+        SmbSettings settings = SmbSettings.load(this);
+        if (!settings.isConfigured()) {
+            return "SMB 未配置";
+        }
+        return settings.share + (browserDir.length() == 0 ? "" : "/" + browserDir);
+    }
+
+    private static String parentOf(String path) {
+        if (path == null || path.length() == 0) {
+            return "";
+        }
+        int slash = path.lastIndexOf('/');
+        return slash < 0 ? "" : path.substring(0, slash);
+    }
+
+    private static boolean playable(String name) {
+        String n = name.toLowerCase(java.util.Locale.US);
+        return n.endsWith(".mp4") || n.endsWith(".mkv") || n.endsWith(".mov")
+                || n.endsWith(".m4v") || n.endsWith(".webm") || n.endsWith(".ts")
+                || n.endsWith(".avi");
+    }
+
+    private static String sizeText(long bytes) {
+        if (bytes <= 0) {
+            return "";
+        }
+        if (bytes >= 1073741824L) {
+            return String.format(java.util.Locale.US, "%.2f GB", bytes / 1073741824f);
+        }
+        if (bytes >= 1048576L) {
+            return String.format(java.util.Locale.US, "%.0f MB", bytes / 1048576f);
+        }
+        return String.format(java.util.Locale.US, "%.0f KB", bytes / 1024f);
+    }
+
+    private static String timeText(long ms) {
+        long total = Math.max(0, ms) / 1000L;
+        long h = total / 3600L;
+        long m = (total / 60L) % 60L;
+        long s = total % 60L;
+        return h > 0 ? String.format("%02d:%02d:%02d", h, m, s)
+                : String.format("%02d:%02d", m, s);
     }
 
     // ------------------------------------------------------------- HUD input
@@ -971,7 +1336,15 @@ public class PlayerActivity extends Activity
         updateRotation();
         if (!sensorPrimed) {
             sensorPrimed = true;
+            // The first real head sample defines the video's forward direction,
+            // so playback starts facing the way the headset is worn.
+            applyRecenter();
             gaze.setAnchor(viewYaw, viewPitch);
+            if (overlay != OVERLAY_NONE) {
+                // The panel may have opened before the first real head sample;
+                // re-anchor it so it sits in front of the user instead of off screen.
+                menuGaze.setAnchor(viewYaw, viewPitch);
+            }
         }
     }
 

@@ -45,6 +45,33 @@ public class StageView extends View {
         openVideoListener = l;
     }
 
+    interface OnEnterVrListener {
+        void onEnterVr();
+    }
+
+    private OnEnterVrListener enterVrListener;
+
+    public void setOnEnterVrListener(OnEnterVrListener l) {
+        enterVrListener = l;
+    }
+
+    interface OnHistoryPlayListener {
+        void onHistoryPlay(String path, String mode, long positionMs);
+    }
+
+    private OnHistoryPlayListener historyPlayListener;
+
+    public void setOnHistoryPlayListener(OnHistoryPlayListener l) {
+        historyPlayListener = l;
+    }
+
+    /** Reloads the resume list; called when the phone page returns to the front. */
+    public void reloadHistory() {
+        history.clear();
+        history.addAll(PlayHistory.load(getContext()));
+        invalidate();
+    }
+
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path clipPath = new Path();
@@ -54,7 +81,12 @@ public class StageView extends View {
     private final RectF wakeZone = new RectF();
     private final RectF undoZone = new RectF();
     private final RectF openZone = new RectF();
+    private final RectF vrZone = new RectF();
     private final RectF startZone = new RectF();
+    private final java.util.List<RectF> historyZones = new java.util.ArrayList<>();
+    private final java.util.List<PlayHistory.Entry> history = new java.util.ArrayList<>();
+    /** Bottom of the HUD spec block; the resume list starts below it. */
+    private float chromeBottom;
     private final RectF ipdTrack = new RectF();
     private final RectF[] modelChips = {new RectF(), new RectF(), new RectF()};
     private final RectF[] screenChips = {new RectF(), new RectF(), new RectF()};
@@ -120,6 +152,10 @@ public class StageView extends View {
     }
 
     private float W, H, dp, side, ppd, cx, cy;
+    /** True when the window is wider than tall; the phone page then splits into two columns. */
+    private boolean landscape;
+    /** Right-hand column that carries the info block, the buttons and the resume list. */
+    private final RectF panel = new RectF();
     private Typeface tfReg, tfMed, tfLight;
 
     public StageView(Context c) {
@@ -153,25 +189,61 @@ public class StageView extends View {
         W = w;
         H = h;
         dp = getResources().getDisplayMetrics().density;
-        side = Math.min(w, h * 0.66f);
-        float top = Math.max(26 * dp, h * 0.045f);
-        eye.set((w - side) / 2f, top, (w - side) / 2f + side, top + side);
+        landscape = w > h;
+        float barH = landscape ? 54 * dp : 62 * dp;
+
+        if (landscape) {
+            // Landscape: square eye preview on the left, everything else stacked in
+            // the right column, bottom bar kept as a thin footer.
+            float margin = 18 * dp;
+            float barY = H - 12 * dp - barH;
+            chrome.set(margin, barY, W - margin, barY + barH);
+            float top = 14 * dp;
+            float bottom = chrome.top - 12 * dp;
+            float contentH = Math.max(1f, bottom - top);
+            side = Math.min(contentH, W * 0.44f);
+            eye.set(margin, top + (contentH - side) / 2f, margin + side,
+                    top + (contentH - side) / 2f + side);
+            panel.set(eye.right + 22 * dp, top, W - margin, bottom);
+        } else {
+            side = Math.min(w, h * 0.66f);
+            float top = Math.max(26 * dp, h * 0.045f);
+            eye.set((w - side) / 2f, top, (w - side) / 2f + side, top + side);
+            chrome.set(16 * dp, H - 16 * dp - barH, W - 16 * dp, H - 16 * dp);
+            panel.setEmpty();
+        }
+
         ppd = side / FOV;
         cx = eye.centerX();
         cy = eye.centerY();
 
-        float barH = 62 * dp;
-        float barY = H - 16 * dp - barH;
-        chrome.set(16 * dp, barY, W - 16 * dp, barY + barH);
         float cell = chrome.width() / 4f;
         for (int i = 0; i < 4; i++) {
             zones[i].set(chrome.left + i * cell, chrome.top, chrome.left + (i + 1) * cell, chrome.bottom);
         }
         wakeZone.set(X(-12.5f), Y(-40.5f), X(12.5f), Y(-37.5f));
 
-        float btnH = 54 * dp;
-        float btnBottom = chrome.top - 16 * dp;
-        openZone.set(24 * dp, btnBottom - btnH, W - 24 * dp, btnBottom);
+        if (landscape) {
+            float btnH = 52 * dp;
+            float gap = 10 * dp;
+            float pLeft = panel.left;
+            float pRight = panel.right;
+            float vrW = (pRight - pLeft - gap) * 0.32f;
+            float btnTop = Math.min(panel.top + 108 * dp, panel.bottom - 40 * dp - btnH);
+            openZone.set(pLeft, btnTop, pRight - gap - vrW, btnTop + btnH);
+            vrZone.set(openZone.right + gap, btnTop, pRight, btnTop + btnH);
+            undoZone.set(pLeft, panel.bottom - 42 * dp, pRight, panel.bottom);
+            chromeBottom = openZone.bottom;
+        } else {
+            float btnH = 54 * dp;
+            float btnBottom = chrome.top - 16 * dp;
+            float gap = 10 * dp;
+            float left = 24 * dp;
+            float right = W - 24 * dp;
+            float vrW = (right - left - gap) * 0.34f;
+            openZone.set(left, btnBottom - btnH, right - gap - vrW, btnBottom);
+            vrZone.set(openZone.right + gap, btnBottom - btnH, right, btnBottom);
+        }
     }
 
     private float X(float yaw) {
@@ -204,9 +276,14 @@ public class StageView extends View {
         c.drawRect(0, 0, W, H, p);
         p.setShader(null);
 
-        float markW = W * 0.21f;
+        float markW = landscape ? Math.min(W * 0.17f, H * 0.42f) : W * 0.21f;
         float markH = markW * 0.62f;
-        float markY = H * 0.305f;
+        float markY = landscape ? H * 0.28f : H * 0.305f;
+        float titleY = landscape ? H * 0.60f : H * 0.445f;
+        float ruleY = landscape ? H * 0.645f : H * 0.472f;
+        float subY = landscape ? H * 0.700f : H * 0.515f;
+        float titleSize = landscape ? 26 * dp : W * 0.098f;
+        float subSize = landscape ? 10 * dp : W * 0.030f;
         float l = W / 2f - markW / 2f, r = W / 2f + markW / 2f;
         float t = markY - markH / 2f, b = markY + markH / 2f;
         float rr = markH * 0.26f;
@@ -251,17 +328,18 @@ public class StageView extends View {
         p.setStyle(Paint.Style.STROKE);
 
         tp.setLetterSpacing(0.22f);
-        txt(c, "GAZELINE", W / 2f, H * 0.445f, W * 0.098f, 0xFFF4F8FF, tfLight, Paint.Align.CENTER);
+        txt(c, "GAZELINE", W / 2f, titleY, titleSize, 0xFFF4F8FF, tfLight, Paint.Align.CENTER);
         tp.setLetterSpacing(0f);
 
         p.setColor(0x5567E8F9);
-        c.drawRect(W / 2f - W * 0.10f, H * 0.472f, W / 2f + W * 0.10f, H * 0.472f + 1.2f * dp, p);
+        c.drawRect(W / 2f - W * 0.10f, ruleY, W / 2f + W * 0.10f, ruleY + 1.2f * dp, p);
 
         tp.setLetterSpacing(0.28f);
-        txt(c, "CARDBOARD VR PLAYER", W / 2f, H * 0.515f, W * 0.030f, 0xFF8FA0BA, tfReg, Paint.Align.CENTER);
+        txt(c, "CARDBOARD VR PLAYER", W / 2f, subY, subSize, 0xFF8FA0BA, tfReg, Paint.Align.CENTER);
         tp.setLetterSpacing(0f);
 
-        txt(c, versionText(), W / 2f, H - 54 * dp, 11 * dp, 0x55A7B2C7, tfReg, Paint.Align.CENTER);
+        txt(c, versionText(), W / 2f, H - (landscape ? 30 : 54) * dp, 11 * dp, 0x55A7B2C7,
+                tfReg, Paint.Align.CENTER);
     }
 
     private String versionLabel;
@@ -310,6 +388,7 @@ public class StageView extends View {
         txt(c, "GAZELINE", eye.left + 14 * dp, eye.top + 22 * dp, 9.5f * dp, 0x66C7D4E8, tfMed, Paint.Align.LEFT);
 
         drawHudChrome(c);
+        drawHistory(c);
         drawOpenEntry(c);
         drawBar(c, new String[]{"HUD 预览", "S5 校准",
                 hudVisible ? "收起 HUD" : "叫回 HUD", "关于"}, 0);
@@ -319,8 +398,12 @@ public class StageView extends View {
     }
 
     private void drawOpenEntry(Canvas c) {
-        txt(c, "上方为静态 HUD 预览 · 真实播放从下方进入", openZone.left + 2 * dp,
-                openZone.top - 12 * dp, 10.2f * dp, 0xFF7A879E, tfReg, Paint.Align.LEFT);
+        String hint = landscape
+                ? "左侧为静态 HUD 预览 · 预览内可直接点播放键"
+                : "上方为静态 HUD 预览 · 真实播放从下方进入";
+        txt(c, hint, openZone.left + 2 * dp,
+                openZone.top - (landscape ? 14 : 12) * dp, 10.2f * dp, 0xFF7A879E, tfReg,
+                Paint.Align.LEFT);
 
         p.setStyle(Paint.Style.FILL);
         p.setAlpha(255);
@@ -330,7 +413,7 @@ public class StageView extends View {
         p.setShader(null);
 
         float cy2 = openZone.centerY();
-        float tx = openZone.left + 26 * dp;
+        float tx = openZone.left + 22 * dp;
         Path tri = new Path();
         tri.moveTo(tx, cy2 - 8 * dp);
         tri.lineTo(tx + 14 * dp, cy2);
@@ -339,13 +422,128 @@ public class StageView extends View {
         p.setColor(0xFF1A1204);
         c.drawPath(tri, p);
 
-        txt(c, "打开视频", tx + 24 * dp, cy2 + 5.6f * dp, 15.5f * dp, 0xFF1A1204, tfMed, Paint.Align.LEFT);
-        txt(c, "360° / SBS / SMB", openZone.right - 20 * dp, cy2 + 4.6f * dp, 12 * dp, 0xCC1A1204, tfReg, Paint.Align.RIGHT);
+        txt(c, "片库", tx + 24 * dp, cy2 + 5.6f * dp, 15.5f * dp, 0xFF1A1204, tfMed, Paint.Align.LEFT);
+        txt(c, "本地 / SMB", openZone.right - 16 * dp, cy2 + 4.6f * dp, 10.5f * dp,
+                0xCC1A1204, tfReg, Paint.Align.RIGHT);
+
+        p.setColor(0x1AFFFFFF);
+        c.drawRoundRect(vrZone, vrZone.height() / 2f, vrZone.height() / 2f, p);
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(1.2f * dp);
+        p.setColor(0x6667E8F9);
+        c.drawRoundRect(vrZone, vrZone.height() / 2f, vrZone.height() / 2f, p);
+        p.setStyle(Paint.Style.FILL);
+        txt(c, "进入 VR", vrZone.centerX(), vrZone.centerY() + 5f * dp, 14f * dp,
+                0xFF9FE9F7, tfMed, Paint.Align.CENTER);
+        txt(c, "头显片库", vrZone.centerX(), vrZone.centerY() + 18f * dp, 9.5f * dp,
+                0x8867E8F9, tfReg, Paint.Align.CENTER);
+    }
+
+    /** Resume list: the last films with the position they stopped at. */
+    private void drawHistory(Canvas c) {
+        historyZones.clear();
+        if (history.isEmpty()) {
+            return;
+        }
+        float x0 = landscape ? panel.left : 24 * dp;
+        float x1 = landscape ? panel.right : W - 24 * dp;
+        float y = landscape ? openZone.bottom + 14 * dp : chromeBottom + 22 * dp;
+        txt(c, "继续观看", x0 + 2 * dp, y, 12.5f * dp, 0xFF93A2BA, tfMed, Paint.Align.LEFT);
+        txt(c, "断点续播 · 应用与 VR 共用", x1, y, 10.2f * dp, 0xFF6F7A91, tfReg, Paint.Align.RIGHT);
+        y += 10 * dp;
+
+        boolean blocked = undoPath != null;
+        float limit;
+        if (landscape) {
+            limit = blocked ? undoZone.top - 6 * dp : panel.bottom;
+        } else {
+            limit = blocked ? openZone.top - 62 * dp : openZone.top - 6 * dp;
+        }
+        float rowH = landscape ? 38 * dp : 52 * dp;
+        float gap = landscape ? 6 * dp : 8 * dp;
+        int max = (int) Math.min(3, (limit - y + gap) / (rowH + gap));
+        max = Math.max(0, Math.min(max, history.size()));
+        for (int i = 0; i < max; i++) {
+            PlayHistory.Entry e = history.get(i);
+            RectF r = new RectF(x0, y, x1, y + rowH);
+            historyZones.add(r);
+            p.setColor(0xE60B1018);
+            c.drawRoundRect(r, 14 * dp, 14 * dp, p);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(1);
+            p.setColor(0x1FFFFFFF);
+            c.drawRoundRect(r, 14 * dp, 14 * dp, p);
+            p.setStyle(Paint.Style.FILL);
+
+            String name = e.name == null || e.name.length() == 0 ? e.source : e.name;
+            String mode = "sbs".equals(e.mode) ? "SBS" : "360°";
+            String pos = e.durationMs > 0
+                    ? timeText(e.positionMs) + " / " + timeText(e.durationMs)
+                    : timeText(e.positionMs);
+
+            if (landscape) {
+                // One-line row: the panel is wide enough to keep name, meta and
+                // action on a single baseline.
+                txt(c, fit(name, r.width() - 250 * dp), r.left + 16 * dp,
+                        r.centerY() + 5 * dp, 13.5f * dp, 0xFFE9EEF9, tfMed, Paint.Align.LEFT);
+                txt(c, mode + " · " + pos, r.right - 62 * dp, r.centerY() + 4 * dp,
+                        10.2f * dp, 0xFF9AA8BE, tfReg, Paint.Align.RIGHT);
+                txt(c, "继续", r.right - 16 * dp, r.centerY() + 5 * dp, 12.5f * dp,
+                        0xFFFFB454, tfMed, Paint.Align.RIGHT);
+            } else {
+                float maxW = r.width() - 150 * dp;
+                txt(c, fit(name, maxW), r.left + 16 * dp, r.top + 21 * dp, 13.5f * dp,
+                        0xFFE9EEF9, tfMed, Paint.Align.LEFT);
+                txt(c, mode + " · " + pos, r.left + 16 * dp, r.top + 38 * dp, 10.5f * dp,
+                        0xFF9AA8BE, tfReg, Paint.Align.LEFT);
+                txt(c, "继续", r.right - 16 * dp, r.centerY() + 4.5f * dp, 12.5f * dp,
+                        0xFFFFB454, tfMed, Paint.Align.RIGHT);
+            }
+
+            float progress = e.durationMs > 0
+                    ? Math.min(1f, Math.max(0f, (float) e.positionMs / e.durationMs)) : 0f;
+            float barY = r.bottom - 4 * dp;
+            p.setColor(0x22FFFFFF);
+            c.drawRect(r.left + 16 * dp, barY, r.right - 16 * dp, barY + 2 * dp, p);
+            p.setColor(0xCCFFB454);
+            c.drawRect(r.left + 16 * dp, barY,
+                    r.left + 16 * dp + (r.width() - 32 * dp) * progress, barY + 2 * dp, p);
+            y += rowH + gap;
+        }
+    }
+
+    private String fit(String text, float maxWidth) {
+        if (text == null) {
+            return "";
+        }
+        tp.setTextSize(13.5f * dp);
+        tp.setTypeface(tfMed);
+        if (tp.measureText(text) <= maxWidth) {
+            return text;
+        }
+        int n = text.length();
+        while (n > 1 && tp.measureText(text.substring(0, n) + "…") > maxWidth) {
+            n--;
+        }
+        return text.substring(0, n) + "…";
+    }
+
+    private static String timeText(long ms) {
+        long total = Math.max(0, ms) / 1000L;
+        long h = total / 3600L;
+        long m = (total / 60L) % 60L;
+        long s = total % 60L;
+        return h > 0 ? String.format("%02d:%02d:%02d", h, m, s)
+                : String.format("%02d:%02d", m, s);
     }
 
     private void drawUndo(Canvas c) {
         float h = 42 * dp;
-        undoZone.set(24 * dp, openZone.top - 10 * dp - h, W - 24 * dp, openZone.top - 10 * dp);
+        if (landscape) {
+            undoZone.set(panel.left, panel.bottom - h, panel.right, panel.bottom);
+        } else {
+            undoZone.set(24 * dp, openZone.top - 10 * dp - h, W - 24 * dp, openZone.top - 10 * dp);
+        }
         p.setStyle(Paint.Style.FILL);
         p.setColor(0xE60B1018);
         c.drawRoundRect(undoZone, h * 0.5f, h * 0.5f, p);
@@ -605,6 +803,29 @@ public class StageView extends View {
     }
 
     private void drawHudChrome(Canvas c) {
+        if (landscape) {
+            // Right column: a compact spec block instead of four full-width lines.
+            float x = panel.left;
+            float y = panel.top + 18 * dp;
+            txt(c, "手机端 · 静态 HUD 预览", x, y, 13 * dp, 0xFFDCE6F7, tfMed, Paint.Align.LEFT);
+            txt(c, "头锁定层", panel.right, y, 9.8f * dp, 0xFF6F7A91, tfReg, Paint.Align.RIGHT);
+
+            String[] lines = {
+                    "控件行 −18°：字幕 −30° · −10 s −16° · 播放 0° · +10 s +16° · 菜单 +30°",
+                    "回中 (−37°, −25°) Ø7.5° · 唤醒条 25°×3° @ −39°",
+                    "字幕 @ −33° · 进入 0.85R / 离开 1.15R · 去抖 120 ms",
+                    "聚焦 150 ms · 预备 250 ms · 停留 L1 1.2 / L2 1.8 / L3 2.5 s"
+            };
+            int step = panel.height() > 200 * dp ? 1 : 2;
+            y += 18 * dp;
+            for (int i = 0; i < lines.length; i += step) {
+                txt(c, lines[i], x, y, 9.6f * dp, 0xFF93A2BA, tfReg, Paint.Align.LEFT);
+                y += 13 * dp;
+            }
+            chromeBottom = y;
+            return;
+        }
+
         float x = 24 * dp;
         float y = eye.bottom + 22 * dp;
         txt(c, "外层 HUD · 头锁定（屏幕空间层）", x, y, 13 * dp, 0xFFDCE6F7, tfMed, Paint.Align.LEFT);
@@ -634,6 +855,7 @@ public class StageView extends View {
                 card.left + 12 * dp, card.top + 17 * dp, 10 * dp, 0xFFB9C4DA, tfReg, Paint.Align.LEFT);
         txt(c, "停留 L1 1.2 / L2 1.8 / L3 2.5 s（L3 再确认）· 执行后 500 ms 冷却 · 菜单 400 ms 保护",
                 card.left + 12 * dp, card.top + 34 * dp, 9.2f * dp, 0xFFB9C4DA, tfReg, Paint.Align.LEFT);
+        chromeBottom = card.bottom;
     }
 
     // ---------------------------------------------------------------- S5 calibration
@@ -750,14 +972,15 @@ public class StageView extends View {
      * record are edited here; every step-level tweak stays in the VR page.
      */
     private void drawCalibForm(Canvas c) {
-        float x = 24 * dp;
-        float avail = W - 48 * dp;
-        float y = eye.bottom + 22 * dp;
+        float x = landscape ? panel.left : 24 * dp;
+        float avail = landscape ? panel.width() : W - 48 * dp;
+        float y = landscape ? panel.top + 20 * dp : eye.bottom + 22 * dp;
         CalibParams cp = calibParams();
 
         txt(c, "S5 校准 · 戴前参数", x, y, 13 * dp, 0xFFDCE6F7, tfMed, Paint.Align.LEFT);
         txt(c, CalibParams.hasSaved(getContext()) ? "已保存" : "尚未保存",
-                W - 24 * dp, y, 9.6f * dp, 0x8893A2BA, tfReg, Paint.Align.RIGHT);
+                landscape ? panel.right : W - 24 * dp, y, 9.6f * dp, 0x8893A2BA, tfReg,
+                Paint.Align.RIGHT);
 
         y += 12 * dp;
         txt(c, "这里只需点选；±1 步进的现场微调请进 VR 校准页", x, y, 9.6f * dp,
@@ -779,12 +1002,13 @@ public class StageView extends View {
 
         y += 30 * dp + 16 * dp;
         txt(c, "瞳距 IPD · 50–75 mm", x, y, 10.4f * dp, 0xFF93A2BA, tfReg, Paint.Align.LEFT);
-        txt(c, cp.ipdText(), W - 24 * dp, y, 12.4f * dp, 0xFFFFD9A6, tfMed, Paint.Align.RIGHT);
+        txt(c, cp.ipdText(), landscape ? panel.right : W - 24 * dp, y, 12.4f * dp,
+                0xFFFFD9A6, tfMed, Paint.Align.RIGHT);
         y += 12 * dp;
-        ipdTrack.set(x, y, W - 24 * dp, y + 32 * dp);
+        ipdTrack.set(x, y, landscape ? panel.right : W - 24 * dp, y + 32 * dp);
         drawIpdSlider(c, cp);
 
-        y = ipdTrack.bottom + 14 * dp;
+        y = ipdTrack.bottom + 26 * dp;
         txt(c, "屏幕（只做记录，不参与几何计算）", x, y, 10.4f * dp, 0xFF93A2BA, tfReg,
                 Paint.Align.LEFT);
         y += 7 * dp;
@@ -802,8 +1026,13 @@ public class StageView extends View {
         txt(c, "当前：k1 " + cp.k1Text() + " · k2 " + cp.k2Text() + " · 垂直 " + cp.vertText(),
                 x, y, 9.8f * dp, 0xFFB9C4DA, tfReg, Paint.Align.LEFT);
 
-        // Start button shares the HUD entry's footprint.
-        startZone.set(openZone);
+        // Start button shares the HUD entry's footprint (portrait) or the
+        // bottom of the right column (landscape).
+        if (landscape) {
+            startZone.set(panel.left, panel.bottom - 52 * dp, panel.right, panel.bottom);
+        } else {
+            startZone.set(openZone);
+        }
         p.setStyle(Paint.Style.FILL);
         p.setAlpha(255);
         p.setShader(new LinearGradient(startZone.left, startZone.top, startZone.right, startZone.bottom,
@@ -885,6 +1114,11 @@ public class StageView extends View {
         c.drawRect(0, 0, W, H, p);
         p.setShader(null);
 
+        if (landscape) {
+            drawAboutLandscape(c);
+            return;
+        }
+
         tp.setLetterSpacing(0.18f);
         txt(c, "GAZELINE", W / 2f, H * 0.10f, W * 0.062f, 0xFFF4F8FF, tfLight, Paint.Align.CENTER);
         tp.setLetterSpacing(0.22f);
@@ -945,6 +1179,76 @@ public class StageView extends View {
                 0xFF6F8099, tfReg, Paint.Align.CENTER);
 
         drawBar(c, new String[]{"HUD 预览", "S5 校准", "返回", "关于"}, 3);
+    }
+
+    /** Landscape about page: header on one line, two cards side by side. */
+    private void drawAboutLandscape(Canvas c) {
+        float m = 24 * dp;
+        float y = 22 * dp + 18 * dp;
+        tp.setLetterSpacing(0.18f);
+        txt(c, "GAZELINE", m, y, 20 * dp, 0xFFF4F8FF, tfLight, Paint.Align.LEFT);
+        tp.setLetterSpacing(0.22f);
+        txt(c, "CARDBOARD VR PLAYER", m + 150 * dp, y, 9.6f * dp, 0xFF8FA0BA, tfReg,
+                Paint.Align.LEFT);
+        tp.setLetterSpacing(0f);
+        txt(c, versionText(), W - m, y, 11 * dp, 0xFF67E8F9, tfMed, Paint.Align.RIGHT);
+
+        float cardTop = y + 16 * dp;
+        float cardBottom = chrome.top - 14 * dp;
+        float mid = W / 2f;
+        RectF left = new RectF(m, cardTop, mid - 8 * dp, cardBottom);
+        RectF right = new RectF(mid + 8 * dp, cardTop, W - m, cardBottom);
+        cardBox(c, left);
+        cardBox(c, right);
+
+        float x = left.left + 18 * dp;
+        float ly = left.top + 26 * dp;
+        txt(c, "ABOUT", x, ly, 9.8f * dp, 0xFF7A8DA8, tfMed, Paint.Align.LEFT);
+        ly += 22 * dp;
+        txt(c, "Android 手机 + Cardboard 卡纸盒的 VR 视频播放器", x, ly, 11 * dp,
+                0xFFDDE6F3, tfReg, Paint.Align.LEFT);
+        ly += 19 * dp;
+        txt(c, "360° 全景 / SBS 3D；播放与校准页内全部操作由凝视完成", x, ly, 11 * dp,
+                0xFFDDE6F3, tfReg, Paint.Align.LEFT);
+        ly += 19 * dp;
+        txt(c, "片源：本地存储 / SMB2-3 局域网共享（强制签名）", x, ly, 11 * dp,
+                0xFFDDE6F3, tfReg, Paint.Align.LEFT);
+        ly += 26 * dp;
+        txt(c, "第三方组件只用于局域网串流，不上传视频或账号。", x, ly, 10.5f * dp,
+                0xFF9FB0C6, tfReg, Paint.Align.LEFT);
+        ly += 18 * dp;
+        txt(c, buildLine(), x, ly, 10 * dp, 0xFF6F8099, tfReg, Paint.Align.LEFT);
+
+        float rx = right.left + 18 * dp;
+        float ry = right.top + 26 * dp;
+        txt(c, "开源组件", rx, ry, 9.8f * dp, 0xFF7A8DA8, tfMed, Paint.Align.LEFT);
+        ry += 20 * dp;
+        String[] libs = {
+                "smbj 0.15.0 · SMB2/3 客户端 · Apache-2.0",
+                "asn-one 0.6.0 · ASN.1 · Apache-2.0",
+                "mbassador 1.3.2 · 事件总线 · Apache-2.0",
+                "Bouncy Castle 1.85.2 · NTLM 加密 · MIT-style",
+                "slf4j-api 2.0.18 · 日志门面 · MIT"
+        };
+        for (String s : libs) {
+            txt(c, s, rx, ry, 10.5f * dp, 0xFFA7B2C7, tfReg, Paint.Align.LEFT);
+            ry += 17 * dp;
+        }
+        txt(c, "底部「返回」回到 HUD", right.right - 18 * dp, right.bottom - 12 * dp,
+                10 * dp, 0xFF6F8099, tfReg, Paint.Align.RIGHT);
+
+        drawBar(c, new String[]{"HUD 预览", "S5 校准", "返回", "关于"}, 3);
+    }
+
+    private void cardBox(Canvas c, RectF r) {
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(0xCC0E131C);
+        c.drawRoundRect(r, 18 * dp, 18 * dp, p);
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(1);
+        p.setColor(0x1FFFFFFF);
+        c.drawRoundRect(r, 18 * dp, 18 * dp, p);
+        p.setStyle(Paint.Style.FILL);
     }
 
     private String buildLine() {
@@ -1046,6 +1350,24 @@ public class StageView extends View {
                     openVideoListener.onOpenVideo();
                 }
                 return true;
+            }
+            if (screen == SCR_HUD && vrZone.contains(x, y)) {
+                if (enterVrListener != null) {
+                    enterVrListener.onEnterVr();
+                }
+                return true;
+            }
+            if (screen == SCR_HUD) {
+                for (int i = 0; i < historyZones.size() && i < history.size(); i++) {
+                    if (historyZones.get(i).contains(x, y)) {
+                        PlayHistory.Entry entry = history.get(i);
+                        if (historyPlayListener != null) {
+                            historyPlayListener.onHistoryPlay(entry.source, entry.mode,
+                                    entry.startAt());
+                        }
+                        return true;
+                    }
+                }
             }
             if (!hudVisible && wakeZone.contains(x, y)) {
                 hudVisible = true;

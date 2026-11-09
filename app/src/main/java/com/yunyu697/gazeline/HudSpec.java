@@ -26,7 +26,7 @@ final class HudSpec {
     static final long COOLDOWN_MS = 500;
     static final long RECENTER_COOLDOWN_MS = 1000;
 
-    static final long WAKE_DWELL_MS = 800;
+    static final long WAKE_DWELL_MS = 380;
     static final long RECENTER_CHARGE_MS = 1200;
     static final long RECENTER_READY_MS = 600;
 
@@ -80,9 +80,16 @@ final class HudSpec {
         MENU_SUBTITLE,
         MENU_AUDIO,
         MENU_SPEED,
+        MENU_FILE,
         MENU_EXIT,
         EXIT_CANCEL,
         EXIT_OK,
+        // in-VR file browser
+        BROWSER_ITEM,
+        BROWSER_PREV,
+        BROWSER_NEXT,
+        BROWSER_MODE,
+        BROWSER_CLOSE,
         // S5 calibration page: four step groups, two actions, eye mask, self-test
         CAL_IPD_MINUS,
         CAL_IPD_PLUS,
@@ -121,12 +128,24 @@ final class HudSpec {
                     return "音轨";
                 case MENU_SPEED:
                     return "播放速度";
+                case MENU_FILE:
+                    return "文件管理";
+                case BROWSER_PREV:
+                    return "上一页";
+                case BROWSER_NEXT:
+                    return "下一页";
+                case BROWSER_MODE:
+                    return "投影模式";
+                case BROWSER_CLOSE:
+                    return "关闭";
                 case MENU_EXIT:
                     return "退出播放";
                 case EXIT_CANCEL:
                     return "取消";
                 case EXIT_OK:
                     return "确认退出";
+                case BROWSER_ITEM:
+                    return "文件";
                 case WAKE:
                 default:
                     return "唤回控件";
@@ -148,6 +167,11 @@ final class HudSpec {
         final boolean arming;
         final boolean ring;
         final boolean readyTwoStage;
+        /** Custom row copy for the browser; null on the fixed HUD targets. */
+        final String text;
+        final String detail;
+        /** Browser row index (-1 elsewhere). */
+        final int index;
 
         Target(Id id, float yaw, float pitch, float diameterDeg, long levelMs,
                boolean arming, boolean ring, boolean readyTwoStage) {
@@ -162,6 +186,9 @@ final class HudSpec {
             this.arming = arming;
             this.ring = ring;
             this.readyTwoStage = readyTwoStage;
+            this.text = null;
+            this.detail = null;
+            this.index = -1;
         }
 
         Target(Id id, float yaw, float pitch, float barW, float barH, long dwellMs) {
@@ -181,6 +208,28 @@ final class HudSpec {
             this.arming = arming;
             this.ring = ring;
             this.readyTwoStage = false;
+            this.text = null;
+            this.detail = null;
+            this.index = -1;
+        }
+
+        /** Browser row: dynamic copy plus its index in the page. */
+        Target(Id id, float yaw, float pitch, float barW, float barH, long dwellMs,
+               String text, String detail, int index) {
+            this.id = id;
+            this.yaw = yaw;
+            this.pitch = pitch;
+            this.diameterDeg = 0f;
+            this.barW = barW;
+            this.barH = barH;
+            this.levelMs = dwellMs;
+            this.bar = true;
+            this.arming = false;
+            this.ring = false;
+            this.readyTwoStage = false;
+            this.text = text;
+            this.detail = detail;
+            this.index = index;
         }
 
         float distance(float py, float pp) {
@@ -213,24 +262,29 @@ final class HudSpec {
     static final Target SUBTITLE = new Target(Id.SUBTITLE, -30f, -18f, 8f, L2_MS, true, true, false);
     static final Target MENU = new Target(Id.MENU, 30f, -18f, 8f, L2_MS, true, true, false);
     static final Target RECENTER = new Target(Id.RECENTER, -37f, -25f, 7.5f, L2_MS, true, true, true);
-    static final Target WAKE = new Target(Id.WAKE, 0f, -39f, 25f, 3f, WAKE_DWELL_MS);
+    // The wake target is intentionally much larger than the thin hint bar it
+    // draws: a real headset cannot hold a 3° strip for 800 ms, so any clear
+    // downward glance at the control band brings the HUD back.
+    static final Target WAKE = new Target(Id.WAKE, 0f, -38f, 64f, 16f, WAKE_DWELL_MS);
 
     static final Target[] ROW = {SUBTITLE, REWIND, PLAY, FORWARD, MENU};
 
     static final Target[] PLAYING_TARGETS = {SUBTITLE, REWIND, PLAY, FORWARD, MENU, RECENTER};
 
-    // S4 rows: 3 settings (L2) + isolated exit (L3). Pitches sum to the 57° panel.
+    // S4 rows: settings (L2) + file browser + isolated exit (L3).
     static final Target MENU_SUBTITLE_T = new Target(
-            Id.MENU_SUBTITLE, 0f, 14.3f, 52f, 8f, L2_MS, true, true);
+            Id.MENU_SUBTITLE, 0f, 15.6f, 52f, 7.2f, L2_MS, true, true);
     static final Target MENU_AUDIO_T = new Target(
-            Id.MENU_AUDIO, 0f, 5.1f, 52f, 8f, L2_MS, true, true);
+            Id.MENU_AUDIO, 0f, 8.3f, 52f, 7.2f, L2_MS, true, true);
     static final Target MENU_SPEED_T = new Target(
-            Id.MENU_SPEED, 0f, -4.1f, 52f, 8f, L2_MS, true, true);
+            Id.MENU_SPEED, 0f, 1.0f, 52f, 7.2f, L2_MS, true, true);
+    static final Target MENU_FILE_T = new Target(
+            Id.MENU_FILE, 0f, -6.3f, 52f, 7.2f, L2_MS, true, true);
     static final Target MENU_EXIT_T = new Target(
-            Id.MENU_EXIT, 0f, -13.7f, 52f, 9f, L3_MS, true, true);
+            Id.MENU_EXIT, 0f, -14.6f, 52f, 8.4f, L3_MS, true, true);
 
     static final Target[] MENU_ROWS = {
-            MENU_SUBTITLE_T, MENU_AUDIO_T, MENU_SPEED_T, MENU_EXIT_T
+            MENU_SUBTITLE_T, MENU_AUDIO_T, MENU_SPEED_T, MENU_FILE_T, MENU_EXIT_T
     };
 
     // Exit confirmation: default focus is cancel; confirming takes another L2.
@@ -256,6 +310,40 @@ final class HudSpec {
     static final float CONFIRM_TITLE_PITCH = 9.2f;
     static final float CONFIRM_BODY_PITCH = 3.4f;
     static final float CONFIRM_HINT_PITCH = -12.6f;
+
+    // ------------------------------------------------------------- browser layout
+
+    static final float BROWSER_W = 66f;
+    static final float BROWSER_H = 61f;
+    static final float BROWSER_ROW_W = 58f;
+    static final float BROWSER_ROW_H = 6.2f;
+    static final float[] BROWSER_ROW_PITCH = {18.5f, 11.5f, 4.5f, -2.5f, -9.5f};
+    static final float BROWSER_HEADER_PITCH = 25.4f;
+    static final float BROWSER_PATH_PITCH = 22.6f;
+    static final float BROWSER_FOOTER1_PITCH = -16.5f;
+    static final float BROWSER_FOOTER2_PITCH = -23.5f;
+    static final float BROWSER_HINT_PITCH = -29.2f;
+
+    static final Target BROWSER_PREV_T = new Target(
+            Id.BROWSER_PREV, -15.5f, BROWSER_FOOTER1_PITCH, 19f, 6f, L1_MS);
+    static final Target BROWSER_NEXT_T = new Target(
+            Id.BROWSER_NEXT, 15.5f, BROWSER_FOOTER1_PITCH, 19f, 6f, L1_MS);
+    static final Target BROWSER_CLOSE_T = new Target(
+            Id.BROWSER_CLOSE, -15.5f, BROWSER_FOOTER2_PITCH, 19f, 6f, L1_MS);
+
+    static Target browserRow(float pitch, String text, String detail, int index) {
+        return new Target(Id.BROWSER_ITEM, 0f, pitch, BROWSER_ROW_W, BROWSER_ROW_H,
+                L1_MS, text, detail, index);
+    }
+
+    static Target browserMode(String text) {
+        return new Target(Id.BROWSER_MODE, 15.5f, BROWSER_FOOTER2_PITCH, 19f, 6f,
+                L1_MS, text, null, -1);
+    }
+
+    static boolean inBrowserPanel(float yaw, float pitch) {
+        return Math.abs(yaw) <= BROWSER_W * 0.5f && Math.abs(pitch) <= BROWSER_H * 0.5f;
+    }
 
     static boolean inMenuPanel(float yaw, float pitch) {
         return Math.abs(yaw) <= MENU_W * 0.5f && Math.abs(pitch) <= MENU_H * 0.5f;

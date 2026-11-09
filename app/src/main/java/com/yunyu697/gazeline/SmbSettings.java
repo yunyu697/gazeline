@@ -18,6 +18,7 @@ final class SmbSettings {
     private static final String KEY_PATH = "path";
     private static final String KEY_USER = "user";
     private static final String KEY_PASS = "password";
+    private static final String KEY_PROJECTION = "projection";
 
     String host = "";
     int port = 445;
@@ -25,6 +26,8 @@ final class SmbSettings {
     String path = "";
     String user = "";
     String password = "";
+    /** Last projection picked in the library: "360" or "sbs". */
+    String projection = "360";
 
     static SmbSettings load(Context context) {
         SharedPreferences p = context.getApplicationContext()
@@ -36,6 +39,7 @@ final class SmbSettings {
         s.path = p.getString(KEY_PATH, "");
         s.user = p.getString(KEY_USER, "");
         s.password = p.getString(KEY_PASS, "");
+        s.projection = p.getString(KEY_PROJECTION, "360");
         return s;
     }
 
@@ -49,6 +53,7 @@ final class SmbSettings {
                 .putString(KEY_PATH, path)
                 .putString(KEY_USER, user)
                 .putString(KEY_PASS, password)
+                .putString(KEY_PROJECTION, projection)
                 .apply();
     }
 

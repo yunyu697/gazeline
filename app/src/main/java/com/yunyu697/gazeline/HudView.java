@@ -42,6 +42,17 @@ final class HudView extends View {
         float wakeAlpha = 0f;
         float maskAlpha = 0f;
         float flashAlpha = 0f;
+        /** Non-zero while the recenter grace countdown runs (seconds left). */
+        float recenterCountdown = 0f;
+
+        // in-VR file browser rows (overlay 3)
+        HudSpec.Target[] browserTargets;
+        String browserPath = "";
+        String browserHint = "";
+        int browserPage;
+        int browserPages;
+        boolean browserLoading;
+        int browserGen;
 
         // S4 overlay (0 none, 1 menu, 2 exit confirmation)
         int overlay;
@@ -144,6 +155,14 @@ final class HudView extends View {
         frame.wakeAlpha = f.wakeAlpha;
         frame.maskAlpha = f.maskAlpha;
         frame.flashAlpha = f.flashAlpha;
+        frame.recenterCountdown = f.recenterCountdown;
+        frame.browserTargets = f.browserTargets;
+        frame.browserPath = f.browserPath;
+        frame.browserHint = f.browserHint;
+        frame.browserPage = f.browserPage;
+        frame.browserPages = f.browserPages;
+        frame.browserLoading = f.browserLoading;
+        frame.browserGen = f.browserGen;
         frame.overlay = f.overlay;
         frame.overlayAlpha = f.overlayAlpha;
         frame.overlayGaze = f.overlayGaze;
@@ -171,6 +190,8 @@ final class HudView extends View {
         sig = sig * 31 + (int) (f.wakeAlpha * 500);
         sig = sig * 31 + (int) (f.maskAlpha * 500);
         sig = sig * 31 + (int) (f.flashAlpha * 500);
+        sig = sig * 31 + (int) (f.recenterCountdown * 10);
+        sig = sig * 31 + f.browserGen;
         sig = sig * 31 + f.overlay;
         sig = sig * 31 + (int) (f.overlayAlpha * 500);
         sig = sig * 31 + (f.overlayHint == null ? 0 : f.overlayHint.hashCode());
@@ -249,6 +270,8 @@ final class HudView extends View {
             GazeController.Readout mg = frame.overlayGaze;
             if (frame.overlay == 1) {
                 drawMenu(c, mg == null ? EMPTY : mg, frame.overlayAlpha);
+            } else if (frame.overlay == 3) {
+                drawBrowser(c, mg == null ? EMPTY : mg, frame.overlayAlpha);
             } else {
                 drawConfirm(c, mg == null ? EMPTY : mg, frame.overlayAlpha);
             }
@@ -277,6 +300,10 @@ final class HudView extends View {
         // Subtitles outlive the HUD fade: they are content, not a control.
         if (frame.subtitleOn && frame.subtitle.length() > 0 && !g.charging) {
             drawSubtitle(c, relYaw, relPitch, Math.max(0.85f, a));
+        }
+
+        if (frame.recenterCountdown > 0f) {
+            drawRecenterCountdown(c, relPitch, a);
         }
 
         if (frame.wakeAlpha > 0.01f) {
@@ -669,10 +696,11 @@ final class HudView extends View {
         String action = actionLabel(target);
         if (target.id == HudSpec.Id.RECENTER) {
             if (g.ready) {
-                drawPillText(c, "待发 · " + oneDecimal(Math.max(0f, remainingMs(g) / 1000f)) + " 秒后回中",
+                drawPillText(c, "待发 · " + oneDecimal(Math.max(0f, remainingMs(g) / 1000f))
+                                + " 秒后进入姿态调整",
                         target, relYaw, relPitch, 0xFFB0FFE0, alpha);
             } else {
-                drawPillText(c, "1.2 秒充能 · " + action, target, relYaw, relPitch,
+                drawPillText(c, "注视触发 · 之后 3.5 秒调整姿态", target, relYaw, relPitch,
                         HudSpec.C_AMBER, alpha);
             }
         } else if (g.charging) {
@@ -752,6 +780,25 @@ final class HudView extends View {
         c.drawText(frame.status, cx, cy + textPaint.getTextSize() * 0.34f, textPaint);
     }
 
+    /** Grace window copy: the head pose captured at the end becomes forward. */
+    private void drawRecenterCountdown(Canvas c, float relPitch, float alpha) {
+        textPaint.setTypeface(medium);
+        textPaint.setTextSize(fontPx(2.2f));
+        tint(textPaint, 0xFFFFE6C2, (int) (alpha * 245));
+        textPaint.setTextAlign(Paint.Align.CENTER);
+        c.drawText("调整姿态 · " + oneDecimal(frame.recenterCountdown) + " 秒后回中",
+                eyeCx, sy(-6.2f - relPitch), textPaint);
+
+        textPaint.setTypeface(regular);
+        textPaint.setTextSize(fontPx(1.3f));
+        tint(textPaint, HudSpec.C_TEXT2, (int) (alpha * 215));
+        c.drawText("结束后，你此刻的朝向就是新的正前方", eyeCx, sy(-8.6f - relPitch), textPaint);
+
+        textPaint.setTextSize(fontPx(1.2f));
+        tint(textPaint, 0xFFB7C3D8, (int) (alpha * 205));
+        c.drawText("按返回键　取消回中", eyeCx, sy(-30.2f - relPitch), textPaint);
+    }
+
     // ------------------------------------------------------------- S4 menu
 
     private void drawMenu(Canvas c, GazeController.Readout g, float alpha) {
@@ -769,7 +816,7 @@ final class HudView extends View {
         textPaint.setTextSize(fontPx(2.05f));
         tint(textPaint, HudSpec.C_TEXT, (int) (alpha * 255));
         textPaint.setTextAlign(Paint.Align.LEFT);
-        c.drawText("播放设置", left, sy(pitch0 + HudSpec.MENU_HEADER_PITCH), textPaint);
+        c.drawText("菜单", left, sy(pitch0 + HudSpec.MENU_HEADER_PITCH), textPaint);
 
         textPaint.setTypeface(regular);
         textPaint.setTextSize(fontPx(1.15f));
@@ -898,6 +945,198 @@ final class HudView extends View {
         }
     }
 
+    /**
+     * In-VR SMB browser: five gaze rows per page, page arrows and the same
+     * projection toggle as the phone library. Large rows and short dwells keep
+     * it usable while wearing the headset.
+     */
+    private void drawBrowser(Canvas c, GazeController.Readout g, float alpha) {
+        float yaw0 = -g.relYaw;
+        float pitch0 = -g.relPitch;
+        if (!onScreen(yaw0, pitch0)) {
+            return;
+        }
+        angularRect(yaw0, pitch0, HudSpec.BROWSER_W, HudSpec.BROWSER_H, rect);
+        drawPanel(c, rect, 16f, 0xF20B1018, 0x33FFFFFF, alpha);
+        float left = rect.left + 16f;
+        float right = rect.right - 16f;
+
+        textPaint.setTypeface(medium);
+        textPaint.setTextSize(fontPx(2.05f));
+        tint(textPaint, HudSpec.C_TEXT, (int) (alpha * 255));
+        textPaint.setTextAlign(Paint.Align.LEFT);
+        c.drawText("文件管理", left, sy(pitch0 + HudSpec.BROWSER_HEADER_PITCH), textPaint);
+
+        textPaint.setTypeface(regular);
+        textPaint.setTextSize(fontPx(1.15f));
+        tint(textPaint, HudSpec.C_TEXT3, (int) (alpha * 220));
+        textPaint.setTextAlign(Paint.Align.RIGHT);
+        String page = frame.browserPage + 1 + " / " + Math.max(1, frame.browserPages);
+        c.drawText(page, right, sy(pitch0 + HudSpec.BROWSER_HEADER_PITCH), textPaint);
+
+        textPaint.setTextSize(fontPx(1.05f));
+        tint(textPaint, 0xFF8FB3C9, (int) (alpha * 220));
+        textPaint.setTextAlign(Paint.Align.LEFT);
+        String path = frame.browserPath == null ? "" : frame.browserPath;
+        float maxW = right - left;
+        String fitted = ellipsizeStart(path, maxW);
+        c.drawText(fitted, left, sy(pitch0 + HudSpec.BROWSER_PATH_PITCH), textPaint);
+
+        tint(fillPaint, 0x1FFFFFFF, (int) (alpha * 255));
+        float dividerP = HudSpec.BROWSER_HEADER_PITCH - 1.4f;
+        float dy = sy(pitch0 + dividerP);
+        c.drawRect(left, dy, right, dy + 1f, fillPaint);
+
+        HudSpec.Target[] targets = frame.browserTargets;
+        if (targets == null || targets.length == 0) {
+            textPaint.setTypeface(regular);
+            textPaint.setTextSize(fontPx(1.35f));
+            tint(textPaint, HudSpec.C_TEXT3, (int) (alpha * 230));
+            textPaint.setTextAlign(Paint.Align.CENTER);
+            c.drawText("此目录没有可播放的视频", rect.centerX(),
+                    sy(pitch0 + HudSpec.BROWSER_ROW_PITCH[2]), textPaint);
+        } else {
+            for (HudSpec.Target t : targets) {
+                if (t.id == HudSpec.Id.BROWSER_ITEM) {
+                    drawBrowserRow(c, t, g, alpha);
+                }
+            }
+        }
+
+        for (HudSpec.Target t : targets == null ? new HudSpec.Target[0] : targets) {
+            if (t.id == HudSpec.Id.BROWSER_ITEM) {
+                continue;
+            }
+            drawBrowserButton(c, t, g, alpha);
+        }
+
+        textPaint.setTypeface(regular);
+        textPaint.setTextSize(fontPx(1.05f));
+        tint(textPaint, HudSpec.C_TEXT3, (int) (alpha * 220));
+        textPaint.setTextAlign(Paint.Align.CENTER);
+        String hint;
+        if (frame.browserLoading) {
+            hint = "正在读取…";
+        } else if (frame.browserHint != null && frame.browserHint.length() > 0) {
+            hint = frame.browserHint;
+            tint(textPaint, HudSpec.C_AMBER, (int) (alpha * 235));
+        } else {
+            hint = "★ 收藏夹优先显示 · 返回键退出";
+        }
+        c.drawText(hint, rect.centerX(), sy(pitch0 + HudSpec.BROWSER_HINT_PITCH), textPaint);
+    }
+
+    private void drawBrowserRow(Canvas c, HudSpec.Target t, GazeController.Readout g,
+                                float alpha) {
+        float yaw = t.yaw - g.relYaw;
+        float pitch = t.pitch - g.relPitch;
+        if (!onScreen(yaw, pitch)) {
+            return;
+        }
+        boolean focused = g.focus == t;
+        angularRect(yaw, pitch, t.barW, t.barH, rect);
+        tint(fillPaint, focused ? 0x1AFFB454 : 0x0FFFFFFF, (int) (alpha * 255));
+        c.drawRoundRect(rect, 8f, 8f, fillPaint);
+        tint(strokePaint, focused ? HudSpec.C_AMBER : 0x24FFFFFF,
+                (int) (alpha * (focused ? 255 : 205)));
+        strokePaint.setStyle(Paint.Style.STROKE);
+        strokePaint.setStrokeWidth(focused ? 2.2f : 1.1f);
+        c.drawRoundRect(rect, 8f, 8f, strokePaint);
+
+        textPaint.setTypeface(medium);
+        textPaint.setTextSize(fontPx(1.4f));
+        tint(textPaint, HudSpec.C_TEXT, (int) (alpha * 250));
+        textPaint.setTextAlign(Paint.Align.LEFT);
+        float titleMax = rect.width() * 0.62f;
+        String title = t.text == null ? "" : t.text;
+        String fit = ellipsizeEnd(title, titleMax);
+        c.drawText(fit, rect.left + 12f,
+                rect.centerY() + textPaint.getTextSize() * 0.36f, textPaint);
+
+        if (t.detail != null && t.detail.length() > 0) {
+            tint(textPaint, 0xFF98A6BC, (int) (alpha * 235));
+            textPaint.setTextSize(fontPx(1.05f));
+            textPaint.setTextAlign(Paint.Align.RIGHT);
+            String det = ellipsizeEnd(t.detail, rect.width() * 0.36f);
+            c.drawText(det, rect.right - 12f,
+                    rect.centerY() + fontPx(0.35f), textPaint);
+        }
+
+        if (focused) {
+            float prog = g.charging ? g.progress : 0f;
+            float h = Math.max(2f, rect.height() * 0.06f);
+            tint(fillPaint, HudSpec.C_AMBER, (int) (alpha * 245));
+            c.drawRect(rect.left + 8f, rect.bottom - h - 3f,
+                    rect.left + 8f + (rect.width() - 16f) * prog,
+                    rect.bottom - 3f, fillPaint);
+        }
+    }
+
+    private void drawBrowserButton(Canvas c, HudSpec.Target t, GazeController.Readout g,
+                                   float alpha) {
+        float yaw = t.yaw - g.relYaw;
+        float pitch = t.pitch - g.relPitch;
+        if (!onScreen(yaw, pitch)) {
+            return;
+        }
+        boolean focused = g.focus == t;
+        angularRect(yaw, pitch, t.barW, t.barH, rect);
+        tint(fillPaint, focused ? 0x26FFB454 : 0x14FFFFFF, (int) (alpha * 255));
+        c.drawRoundRect(rect, 8f, 8f, fillPaint);
+        tint(strokePaint, focused ? HudSpec.C_AMBER : 0x2EFFFFFF,
+                (int) (alpha * (focused ? 255 : 215)));
+        strokePaint.setStyle(Paint.Style.STROKE);
+        strokePaint.setStrokeWidth(focused ? 2f : 1f);
+        c.drawRoundRect(rect, 8f, 8f, strokePaint);
+
+        String label = t.text != null && t.text.length() > 0 ? t.text : t.id.label();
+        textPaint.setTypeface(medium);
+        textPaint.setTextSize(fontPx(1.25f));
+        tint(textPaint, focused ? HudSpec.C_AMBER : HudSpec.C_TEXT2, (int) (alpha * 250));
+        textPaint.setTextAlign(Paint.Align.CENTER);
+        c.drawText(label, rect.centerX(),
+                rect.centerY() + textPaint.getTextSize() * 0.36f, textPaint);
+
+        if (focused && g.charging) {
+            float h = Math.max(2f, rect.height() * 0.07f);
+            tint(fillPaint, HudSpec.C_AMBER, (int) (alpha * 245));
+            c.drawRect(rect.left + 8f, rect.bottom - h - 3f,
+                    rect.left + 8f + (rect.width() - 16f) * g.progress,
+                    rect.bottom - 3f, fillPaint);
+        }
+    }
+
+    /** Truncates with an ellipsis, keeping the head of the string. */
+    private String ellipsizeEnd(String text, float maxWidth) {
+        if (text == null) {
+            return "";
+        }
+        if (textPaint.measureText(text) <= maxWidth) {
+            return text;
+        }
+        int n = text.length();
+        while (n > 1 && textPaint.measureText(text.substring(0, n) + "…") > maxWidth) {
+            n--;
+        }
+        return text.substring(0, n) + "…";
+    }
+
+    /** Truncates with an ellipsis from the front, so the path's tail stays. */
+    private String ellipsizeStart(String text, float maxWidth) {
+        if (text == null) {
+            return "";
+        }
+        if (textPaint.measureText(text) <= maxWidth) {
+            return text;
+        }
+        int start = 0;
+        while (start < text.length() - 1
+                && textPaint.measureText("…" + text.substring(start + 1)) > maxWidth) {
+            start++;
+        }
+        return "…" + text.substring(start + 1);
+    }
+
     private void drawConfirm(Canvas c, GazeController.Readout g, float alpha) {
         float yaw0 = -g.relYaw;
         float pitch0 = -g.relPitch;
@@ -978,6 +1217,8 @@ final class HudView extends View {
                 return "音";
             case MENU_SPEED:
                 return "×";
+            case MENU_FILE:
+                return "库";
             case MENU_EXIT:
             default:
                 return "退";
@@ -992,6 +1233,8 @@ final class HudView extends View {
                 return f.audioValue == null ? "无" : f.audioValue;
             case MENU_SPEED:
                 return speedText(f.speed);
+            case MENU_FILE:
+                return "打开";
             case MENU_EXIT:
             default:
                 return "2.5s+确认";
@@ -1006,6 +1249,8 @@ final class HudView extends View {
                 return frame.audioText == null ? "音轨加载中" : frame.audioText;
             case MENU_SPEED:
                 return "循环 0.5–2.0 · 重进恢复 1.0×";
+            case MENU_FILE:
+                return "SMB 片库 · 收藏夹 · 最近播放";
             case MENU_EXIT:
             default:
                 return "回片库 · 保留进度，5 s 内可撤销";
