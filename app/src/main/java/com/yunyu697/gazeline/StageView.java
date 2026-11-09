@@ -53,6 +53,11 @@ public class StageView extends View {
     private final RectF wakeZone = new RectF();
     private final RectF undoZone = new RectF();
     private final RectF openZone = new RectF();
+    private final RectF startZone = new RectF();
+    private final RectF ipdTrack = new RectF();
+    private final RectF[] modelChips = {new RectF(), new RectF(), new RectF()};
+    private final RectF[] screenChips = {new RectF(), new RectF(), new RectF()};
+    private boolean ipdDragging;
 
     private String undoPath;
     private String undoMode;
@@ -67,6 +72,36 @@ public class StageView extends View {
 
     public void setOnUndoPlayListener(OnUndoPlayListener l) {
         undoListener = l;
+    }
+
+    interface OnStartCalibListener {
+        void onStartCalib();
+    }
+
+    private OnStartCalibListener startCalibListener;
+
+    public void setOnStartCalibListener(OnStartCalibListener l) {
+        startCalibListener = l;
+    }
+
+    private CalibParams calib;
+
+    private CalibParams calibParams() {
+        if (calib == null) {
+            calib = CalibParams.load(getContext());
+        }
+        return calib;
+    }
+
+    /** Called after the VR page returns so the phone page shows what was saved. */
+    public void reloadCalib() {
+        calib = CalibParams.load(getContext());
+        invalidate();
+    }
+
+    private void saveCalib() {
+        calibParams().save(getContext());
+        invalidate();
     }
 
     /** S4 left the player; offer a 5 s "continue" affordance on the phone side. */
@@ -614,8 +649,8 @@ public class StageView extends View {
         c.drawRoundRect(eye, 22 * dp, 22 * dp, p);
         p.setStyle(Paint.Style.FILL);
 
-        drawCalibChrome(c);
-        drawBar(c, new String[]{"HUD 预览", "S5 校准", "重置参数"}, 1);
+        drawCalibForm(c);
+        drawBar(c, new String[]{"HUD 预览", "S5 校准", "恢复出厂"}, 1);
     }
 
     private void drawTestCard(Canvas c) {
@@ -672,11 +707,15 @@ public class StageView extends View {
         c.drawRect(cx - 2.5f * ppd, cy - 0.5f, cx + 2.5f * ppd, cy + 0.5f, p);
         c.drawRect(cx - 0.5f, cy - 2.5f * ppd, cx + 0.5f, cy + 2.5f * ppd, p);
 
+        float halfIpd = calibParams().halfIpdDeg();
         for (int s = -1; s <= 1; s += 2) {
-            float lx = X(s * 2.4f);
-            p.setColor(0x66FFB454);
+            float lx = X(s * halfIpd);
+            p.setColor(0x99FFB454);
             c.drawRect(lx - 1, card.top + 6 * dp, lx + 1, card.bottom - 6 * dp, p);
         }
+        txt(c, "两条对齐线间距 = 瞳距映射（" + calibParams().ipdText() + " → ±"
+                        + String.format(java.util.Locale.US, "%.2f°", halfIpd) + "）",
+                cx, Y(-27.5f), 11f, 0x8893A2BA, tfReg, Paint.Align.CENTER);
 
         // readability samples (right half)
         float rx = X(7);
@@ -702,53 +741,135 @@ public class StageView extends View {
         txt(c, "S5 · 2.5 m · 60°×60°", card.left + 10 * dp, card.top + 20 * dp, 10f, 0x8893A2BA, tfReg, Paint.Align.LEFT);
     }
 
-    private void drawCalibChrome(Canvas c) {
+    /**
+     * Phone-side "before you put it on" page: model, IPD slider and the screen
+     * record are edited here; every step-level tweak stays in the VR page.
+     */
+    private void drawCalibForm(Canvas c) {
         float x = 24 * dp;
+        float avail = W - 48 * dp;
         float y = eye.bottom + 22 * dp;
-        txt(c, "S5 校准 · 测试卡 + 步进微调（静态形态）", x, y, 13 * dp, 0xFFDCE6F7, tfMed, Paint.Align.LEFT);
+        CalibParams cp = calibParams();
 
-        y += 18 * dp;
-        txt(c, "整体均匀发虚 · 远近都糊 · 双眼一样 → 屈光：戴眼镜或换屈光镜片，别动畸变",
-                x, y, 9.6f * dp, 0xFF7FE3B9, tfReg, Paint.Align.LEFT);
-        y += 16 * dp;
-        txt(c, "重影 · 桶形 · 边缘糊 · 单眼垂直偏移 → 参数：用下方步进微调，改完即时生效",
-                x, y, 9.6f * dp, 0xFFFFC97A, tfReg, Paint.Align.LEFT);
+        txt(c, "S5 校准 · 戴前参数", x, y, 13 * dp, 0xFFDCE6F7, tfMed, Paint.Align.LEFT);
+        txt(c, CalibParams.hasSaved(getContext()) ? "已保存" : "尚未保存",
+                W - 24 * dp, y, 9.6f * dp, 0x8893A2BA, tfReg, Paint.Align.RIGHT);
 
-        y += 10 * dp;
-        String[] names = {"瞳距 (IPD)", "k1", "k2", "垂直偏移"};
-        String[] values = {"62.0 mm", "−0.30", "+0.05", "0.0°"};
-        float rowH = 38 * dp;
-        for (int i = 0; i < 4; i++) {
-            float by = y + 20 * dp + i * rowH;
-            txt(c, names[i], x, by + 4 * dp, 11 * dp, 0xFF93A2BA, tfReg, Paint.Align.LEFT);
+        y += 12 * dp;
+        txt(c, "这里只需点选；±1 步进的现场微调请进 VR 校准页", x, y, 9.6f * dp,
+                0xFF8FA0BA, tfReg, Paint.Align.LEFT);
 
-            float mx = x + 118 * dp;
-            p.setColor(0x990A0E14);
-            c.drawCircle(mx, by, 14 * dp, p);
-            p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(1);
-            p.setColor(0x2EFFFFFF);
-            c.drawCircle(mx, by, 14 * dp, p);
-            p.setStyle(Paint.Style.FILL);
-            txt(c, "−", mx, by + 5 * dp, 15 * dp, 0xFFE9F0FF, tfReg, Paint.Align.CENTER);
-
-            p.setColor(0xFF16202C);
-            c.drawRoundRect(mx + 22 * dp, by - 13 * dp, mx + 104 * dp, by + 13 * dp, 8 * dp, 8 * dp, p);
-            txt(c, values[i], mx + 63 * dp, by + 4.4f * dp, 11.4f * dp, 0xFFE9F0FF, tfMed, Paint.Align.CENTER);
-
-            float px = mx + 126 * dp;
-            p.setColor(0x990A0E14);
-            c.drawCircle(px, by, 14 * dp, p);
-            p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(1);
-            p.setColor(0x2EFFFFFF);
-            c.drawCircle(px, by, 14 * dp, p);
-            p.setStyle(Paint.Style.FILL);
-            txt(c, "+", px, by + 5 * dp, 15 * dp, 0xFFE9F0FF, tfReg, Paint.Align.CENTER);
+        y += 22 * dp;
+        txt(c, "镜片型号（决定 k1/k2 初值）", x, y, 10.4f * dp, 0xFF93A2BA, tfReg,
+                Paint.Align.LEFT);
+        y += 7 * dp;
+        String[] models = {CalibParams.modelName(CalibParams.MODEL_V2),
+                CalibParams.modelName(CalibParams.MODEL_V3),
+                CalibParams.modelName(CalibParams.MODEL_GENERIC)};
+        float cw = (avail - 16 * dp) / 3f;
+        for (int i = 0; i < 3; i++) {
+            float l = x + i * (cw + 8 * dp);
+            modelChips[i].set(l, y, l + cw, y + 30 * dp);
+            chip(c, modelChips[i], models[i], cp.model == i);
         }
 
-        txt(c, "VR 内按钮 Ø8°（≈118 px @14.8 px/°）· 步进 ±0.5 mm / ±0.02 / ±0.01 / ±0.5° · 20 s 可读性自测",
-                x, y + 20 * dp + 4 * rowH + 4 * dp, 9.2f * dp, 0x8893A2BA, tfReg, Paint.Align.LEFT);
+        y += 30 * dp + 16 * dp;
+        txt(c, "瞳距 IPD · 50–75 mm", x, y, 10.4f * dp, 0xFF93A2BA, tfReg, Paint.Align.LEFT);
+        txt(c, cp.ipdText(), W - 24 * dp, y, 12.4f * dp, 0xFFFFD9A6, tfMed, Paint.Align.RIGHT);
+        y += 12 * dp;
+        ipdTrack.set(x, y, W - 24 * dp, y + 32 * dp);
+        drawIpdSlider(c, cp);
+
+        y = ipdTrack.bottom + 14 * dp;
+        txt(c, "屏幕（只做记录，不参与几何计算）", x, y, 10.4f * dp, 0xFF93A2BA, tfReg,
+                Paint.Align.LEFT);
+        y += 7 * dp;
+        String[] screens = {"6.3″", "6.7″", "未知"};
+        float[] sizes = {6.3f, 6.7f, 0f};
+        for (int i = 0; i < 3; i++) {
+            float l = x + i * (cw + 8 * dp);
+            screenChips[i].set(l, y, l + cw, y + 28 * dp);
+            boolean active = (sizes[i] == 0f && cp.screenInch <= 0f)
+                    || (sizes[i] > 0f && Math.abs(cp.screenInch - sizes[i]) < 0.01f);
+            chip(c, screenChips[i], screens[i], active);
+        }
+
+        y += 28 * dp + 14 * dp;
+        txt(c, "当前：k1 " + cp.k1Text() + " · k2 " + cp.k2Text() + " · 垂直 " + cp.vertText(),
+                x, y, 9.8f * dp, 0xFFB9C4DA, tfReg, Paint.Align.LEFT);
+
+        // Start button shares the HUD entry's footprint.
+        startZone.set(openZone);
+        p.setStyle(Paint.Style.FILL);
+        p.setAlpha(255);
+        p.setShader(new LinearGradient(startZone.left, startZone.top, startZone.right, startZone.bottom,
+                0xFFFFC46B, 0xFFF0A33C, Shader.TileMode.CLAMP));
+        c.drawRoundRect(startZone, startZone.height() / 2f, startZone.height() / 2f, p);
+        p.setShader(null);
+        p.setAlpha(255);
+        txt(c, "开始校准 · 戴上看 60° 测试卡", startZone.centerX(),
+                startZone.centerY() + 5.4f * dp, 15f * dp, 0xFF1A1204, tfMed,
+                Paint.Align.CENTER);
+        txt(c, "VR 内：可读性自测 20 s → 瞳距/k1/k2/垂直 四组 ± 步进 → 保存",
+                startZone.centerX(), startZone.top - 12 * dp, 9.2f * dp, 0xFF7A879E, tfReg,
+                Paint.Align.CENTER);
+    }
+
+    private void drawIpdSlider(Canvas c, CalibParams cp) {
+        float cy2 = ipdTrack.centerY();
+        float left = ipdTrack.left + 12 * dp;
+        float right = ipdTrack.right - 12 * dp;
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(0x26FFFFFF);
+        c.drawRoundRect(new RectF(left, cy2 - 3 * dp, right, cy2 + 3 * dp), 3 * dp, 3 * dp, p);
+
+        float pct = (cp.ipdMm - CalibParams.IPD_MIN)
+                / (CalibParams.IPD_MAX - CalibParams.IPD_MIN);
+        float fill = left + (right - left) * pct;
+        p.setColor(0xFFFFB454);
+        c.drawRoundRect(new RectF(left, cy2 - 3 * dp, fill, cy2 + 3 * dp), 3 * dp, 3 * dp, p);
+
+        p.setColor(0xFFFFC46B);
+        c.drawCircle(fill, cy2, 12 * dp, p);
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(2 * dp);
+        p.setColor(0xFF16202C);
+        c.drawCircle(fill, cy2, 12 * dp, p);
+        p.setStyle(Paint.Style.FILL);
+
+        txt(c, "50", left, cy2 + 24 * dp, 9f * dp, 0xFF7A879E, tfReg, Paint.Align.CENTER);
+        txt(c, "63", (left + right) / 2f, cy2 + 24 * dp, 9f * dp, 0xFF7A879E, tfReg,
+                Paint.Align.CENTER);
+        txt(c, "75", right, cy2 + 24 * dp, 9f * dp, 0xFF7A879E, tfReg, Paint.Align.CENTER);
+    }
+
+    private void chip(Canvas c, RectF r, String label, boolean active) {
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(active ? 0x33FFB454 : 0x14FFFFFF);
+        c.drawRoundRect(r, 10 * dp, 10 * dp, p);
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(1);
+        p.setColor(active ? 0x99FFB454 : 0x26FFFFFF);
+        c.drawRoundRect(r, 10 * dp, 10 * dp, p);
+        p.setStyle(Paint.Style.FILL);
+        txt(c, label, r.centerX(), r.centerY() + 4.2f * dp, 10.4f * dp,
+                active ? 0xFFFFD9A6 : 0xFFC7D4E8, active ? tfMed : tfReg,
+                Paint.Align.CENTER);
+    }
+
+    private void setIpdFromX(float x) {
+        float left = ipdTrack.left + 12 * dp;
+        float right = ipdTrack.right - 12 * dp;
+        float pct = (x - left) / Math.max(1f, right - left);
+        pct = Math.max(0f, Math.min(1f, pct));
+        float v = CalibParams.IPD_MIN + pct * (CalibParams.IPD_MAX - CalibParams.IPD_MIN);
+        v = Math.round(v * 2f) / 2f;
+        CalibParams cp = calibParams();
+        if (Math.abs(cp.ipdMm - v) > 0.01f) {
+            cp.ipdMm = v;
+            cp.clamp();
+            saveCalib();
+        }
     }
 
     // ---------------------------------------------------------------- shared chrome
@@ -783,8 +904,44 @@ public class StageView extends View {
 
     @Override
     public boolean onTouchEvent(MotionEvent e) {
+        if (screen == SCR_CALIB) {
+            if (e.getActionMasked() == MotionEvent.ACTION_DOWN && ipdTrack.contains(e.getX(), e.getY())) {
+                ipdDragging = true;
+                setIpdFromX(e.getX());
+                return true;
+            }
+            if (e.getActionMasked() == MotionEvent.ACTION_MOVE && ipdDragging) {
+                setIpdFromX(e.getX());
+                return true;
+            }
+            if (ipdDragging && (e.getActionMasked() == MotionEvent.ACTION_UP
+                    || e.getActionMasked() == MotionEvent.ACTION_CANCEL)) {
+                ipdDragging = false;
+                return true;
+            }
+        }
         if (e.getAction() == MotionEvent.ACTION_UP) {
             float x = e.getX(), y = e.getY();
+            if (screen == SCR_CALIB) {
+                for (int i = 0; i < 3; i++) {
+                    if (modelChips[i].contains(x, y)) {
+                        calibParams().resetToModel(i);
+                        saveCalib();
+                        return true;
+                    }
+                    if (screenChips[i].contains(x, y)) {
+                        calibParams().screenInch = i == 0 ? 6.3f : (i == 1 ? 6.7f : 0f);
+                        saveCalib();
+                        return true;
+                    }
+                }
+                if (startZone.contains(x, y)) {
+                    if (startCalibListener != null) {
+                        startCalibListener.onStartCalib();
+                    }
+                    return true;
+                }
+            }
             if (screen == SCR_SPLASH) {
                 showHud();
                 return true;
@@ -833,11 +990,17 @@ public class StageView extends View {
             }
             if (zones[2].contains(x, y)) {
                 if (screen == SCR_CALIB) {
-                    screen = SCR_HUD;
+                    CalibParams cp = calibParams();
+                    cp.resetToModel(CalibParams.MODEL_GENERIC);
+                    cp.ipdMm = CalibParams.IPD_DEFAULT;
+                    cp.vertLeftDeg = 0f;
+                    cp.vertRightDeg = 0f;
+                    cp.screenInch = 6.3f;
+                    saveCalib();
                 } else {
                     hudVisible = !hudVisible;
+                    invalidate();
                 }
-                invalidate();
                 return true;
             }
         }

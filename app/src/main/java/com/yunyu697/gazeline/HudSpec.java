@@ -82,7 +82,24 @@ final class HudSpec {
         MENU_SPEED,
         MENU_EXIT,
         EXIT_CANCEL,
-        EXIT_OK;
+        EXIT_OK,
+        // S5 calibration page: four step groups, two actions, eye mask, self-test
+        CAL_IPD_MINUS,
+        CAL_IPD_PLUS,
+        CAL_K1_MINUS,
+        CAL_K1_PLUS,
+        CAL_K2_MINUS,
+        CAL_K2_PLUS,
+        CAL_VERT_MINUS,
+        CAL_VERT_PLUS,
+        CAL_RESET,
+        CAL_SAVE,
+        CAL_UNLOCK,
+        EYE_LEFT,
+        EYE_BOTH,
+        EYE_RIGHT,
+        TEST_CLEAR,
+        TEST_BLUR;
 
         String label() {
             switch (this) {

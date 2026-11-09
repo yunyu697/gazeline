@@ -37,13 +37,15 @@ final class ProjectionSbs {
             "uniform float uTanScreenHalfX;\n" +
             "uniform float uTanScreenHalfY;\n" +
             "uniform float uEyeHalf;\n" +
+            "uniform float uEyeShiftX;\n" +
+            "uniform float uEyeShiftY;\n" +
             "varying vec2 vUv;\n" +
             "void main() {\n" +
             "  vec2 p = vUv * 2.0 - 1.0;\n" +
             "  float r2 = dot(p, p);\n" +
             "  vec2 q = p * (1.0 + uK1 * r2 + uK2 * r2 * r2);\n" +
-            "  float tx = q.x * uTanHalfY * uAspect;\n" +
-            "  float ty = q.y * uTanHalfY;\n" +
+            "  float tx = q.x * uTanHalfY * uAspect + uEyeShiftX;\n" +
+            "  float ty = q.y * uTanHalfY + uEyeShiftY;\n" +
             "  if (abs(tx) > uTanScreenHalfX || abs(ty) > uTanScreenHalfY) {\n" +
             "    gl_FragColor = vec4(0.012, 0.014, 0.020, 1.0);\n" +
             "    return;\n" +
@@ -65,9 +67,14 @@ final class ProjectionSbs {
     private final int uTanScreenHalfX;
     private final int uTanScreenHalfY;
     private final int uEyeHalf;
+    private final int uEyeShiftX;
+    private final int uEyeShiftY;
 
     private float k1 = DEFAULT_K1;
     private float k2 = DEFAULT_K2;
+    private float windowOffsetDeg;
+    private float vertLeftDeg;
+    private float vertRightDeg;
 
     ProjectionSbs() {
         program = GlUtil.link(VS, FS);
@@ -81,11 +88,25 @@ final class ProjectionSbs {
         uTanScreenHalfX = GlUtil.uniform(program, "uTanScreenHalfX");
         uTanScreenHalfY = GlUtil.uniform(program, "uTanScreenHalfY");
         uEyeHalf = GlUtil.uniform(program, "uEyeHalf");
+        uEyeShiftX = GlUtil.uniform(program, "uEyeShiftX");
+        uEyeShiftY = GlUtil.uniform(program, "uEyeShiftY");
     }
 
     void setLens(float k1, float k2) {
         this.k1 = k1;
         this.k2 = k2;
+    }
+
+    /**
+     * §1.12 for the SBS pair: k1/k2, the IPD window offset and the per-eye
+     * vertical trim. The window offset compensates only the deviation from the
+     * 63 mm authoring baseline, so the default install is bit-identical.
+     */
+    void setCalib(CalibParams p) {
+        setLens(p.k1, p.k2);
+        windowOffsetDeg = p.sbsWindowOffsetDeg();
+        vertLeftDeg = p.vertLeftDeg;
+        vertRightDeg = p.vertRightDeg;
     }
 
     void draw(int textureId, float[] texMatrix, float viewportAspect, int eye,
@@ -97,6 +118,11 @@ final class ProjectionSbs {
         float videoAspect = (videoWidth > 0 && videoHeight > 0)
                 ? (videoWidth * 0.5f) / videoHeight : 16f / 9f;
         float tanScreenHalfY = tanScreenHalfX / videoAspect;
+        // Left eye samples further right so its image moves left (and vice
+        // versa): the pair separates when the viewer's IPD exceeds 63 mm.
+        float shiftX = (float) Math.tan(Math.toRadians(windowOffsetDeg)) * (eye == 0 ? 1f : -1f);
+        float vertDeg = eye == 0 ? vertLeftDeg : vertRightDeg;
+        float shiftY = (float) Math.tan(Math.toRadians(vertDeg));
 
         GLES20.glUniform1f(uK1, k1);
         GLES20.glUniform1f(uK2, k2);
@@ -105,6 +131,8 @@ final class ProjectionSbs {
         GLES20.glUniform1f(uTanScreenHalfX, tanScreenHalfX);
         GLES20.glUniform1f(uTanScreenHalfY, tanScreenHalfY);
         GLES20.glUniform1f(uEyeHalf, eye == 0 ? 0f : 1f);
+        GLES20.glUniform1f(uEyeShiftX, shiftX);
+        GLES20.glUniform1f(uEyeShiftY, shiftY);
 
         GLES20.glUniformMatrix4fv(uTexMatrix, 1, false, texMatrix, 0);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);

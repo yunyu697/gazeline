@@ -171,6 +171,7 @@ public class PlayerActivity extends Activity
         glView = new GLSurfaceView(this);
         glView.setEGLContextClientVersion(2);
         renderer = new StereoRenderer(this, dataSource, panorama, this);
+        renderer.setCalib(CalibParams.load(this));
         glView.setRenderer(renderer);
         glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
 
@@ -198,6 +199,7 @@ public class PlayerActivity extends Activity
         super.onResume();
         glView.onResume();
         renderer.setFreeze(false);
+        renderer.setCalib(CalibParams.load(this));
         renderer.restartDecoder();
         VideoDecoder d = renderer.decoder();
         if (d != null && playbackRate != 1f) {

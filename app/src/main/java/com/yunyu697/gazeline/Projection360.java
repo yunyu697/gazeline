@@ -35,13 +35,14 @@ final class Projection360 {
             "uniform float uTanHalfY;\n" +
             "uniform float uAspect;\n" +
             "uniform float uEyeShift;\n" +
+            "uniform float uEyeShiftY;\n" +
             "varying vec2 vUv;\n" +
             "void main() {\n" +
             "  vec2 p = vUv * 2.0 - 1.0;\n" +
             "  float r2 = dot(p, p);\n" +
             "  vec2 q = p * (1.0 + uK1 * r2 + uK2 * r2 * r2);\n" +
             "  if (q.x < -1.0 || q.x > 1.0 || q.y < -1.0 || q.y > 1.0) discard;\n" +
-            "  vec3 d = normalize(vec3(q.x * uTanHalfY * uAspect + uEyeShift, q.y * uTanHalfY, -1.0));\n" +
+            "  vec3 d = normalize(vec3(q.x * uTanHalfY * uAspect + uEyeShift, q.y * uTanHalfY + uEyeShiftY, -1.0));\n" +
             "  vec3 w = uRot * d;\n" +
             "  float lon = atan(w.x, -w.z);\n" +
             "  float lat = asin(clamp(w.y, -1.0, 1.0));\n" +
@@ -59,9 +60,12 @@ final class Projection360 {
     private final int uTanHalfY;
     private final int uAspect;
     private final int uEyeShift;
+    private final int uEyeShiftY;
 
     private float k1 = DEFAULT_K1;
     private float k2 = DEFAULT_K2;
+    private float vertLeftDeg;
+    private float vertRightDeg;
 
     Projection360() {
         program = GlUtil.link(VS, FS);
@@ -74,11 +78,23 @@ final class Projection360 {
         uTanHalfY = GlUtil.uniform(program, "uTanHalfY");
         uAspect = GlUtil.uniform(program, "uAspect");
         uEyeShift = GlUtil.uniform(program, "uEyeShift");
+        uEyeShiftY = GlUtil.uniform(program, "uEyeShiftY");
     }
 
     void setLens(float k1, float k2) {
         this.k1 = k1;
         this.k2 = k2;
+    }
+
+    /**
+     * §1.12 applied to the mono panorama: k1/k2 and the per-eye vertical trim
+     * are honoured, IPD is not — a single equirectangular image has no parallax
+     * to offset, so pretending to shift it would only blur the horizon.
+     */
+    void setCalib(CalibParams p) {
+        setLens(p.k1, p.k2);
+        vertLeftDeg = p.vertLeftDeg;
+        vertRightDeg = p.vertRightDeg;
     }
 
     void draw(int textureId, float[] texMatrix, float[] rotRowMajor, float aspect,
@@ -90,12 +106,15 @@ final class Projection360 {
         float tanHalfY = (float) Math.tan(Math.toRadians(DEFAULT_FOV_Y / 2f)) / aspect;
         float eyeShift = eye == 0 ? -1f : 1f;
         eyeShift *= (float) Math.tan(Math.toRadians(DEFAULT_IPD_DEG / 2f));
+        float vertDeg = eye == 0 ? vertLeftDeg : vertRightDeg;
+        float eyeShiftY = (float) Math.tan(Math.toRadians(vertDeg));
 
         GLES20.glUniform1f(uK1, k1);
         GLES20.glUniform1f(uK2, k2);
         GLES20.glUniform1f(uTanHalfY, tanHalfY);
         GLES20.glUniform1f(uAspect, aspect);
         GLES20.glUniform1f(uEyeShift, eyeShift);
+        GLES20.glUniform1f(uEyeShiftY, eyeShiftY);
         GLES20.glUniformMatrix3fv(uRot, 1, true, rotRowMajor, 0);
         GLES20.glUniformMatrix4fv(uTexMatrix, 1, false, texMatrix, 0);
 

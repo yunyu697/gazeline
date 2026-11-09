@@ -15,6 +15,7 @@ public class MainActivity extends Activity {
 
     private static final int REQ_PICK_VIDEO = 1001;
     private static final int REQ_PLAY = 1002;
+    private static final int REQ_CALIB = 1003;
 
     private StageView stage;
     private boolean pendingSbs;
@@ -50,6 +51,13 @@ public class MainActivity extends Activity {
             public void onUndoPlay(String path, String mode, long positionMs) {
                 ui.removeCallbacks(clearUndo);
                 launchPlayer(path, mode, positionMs);
+            }
+        });
+        stage.setOnStartCalibListener(new StageView.OnStartCalibListener() {
+            @Override
+            public void onStartCalib() {
+                startActivityForResult(new Intent(MainActivity.this, CalibActivity.class),
+                        REQ_CALIB);
             }
         });
         setContentView(stage);
@@ -99,6 +107,10 @@ public class MainActivity extends Activity {
                     ui.postDelayed(clearUndo, 5000);
                 }
             }
+            return;
+        }
+        if (requestCode == REQ_CALIB) {
+            stage.reloadCalib();
             return;
         }
         if (requestCode != REQ_PICK_VIDEO || resultCode != RESULT_OK || data == null) {

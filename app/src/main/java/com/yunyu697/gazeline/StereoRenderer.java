@@ -37,6 +37,7 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
 
     private volatile float[] rot = IDENTITY;
     private volatile boolean freeze;
+    private volatile CalibParams calib = CalibParams.defaults();
 
     private int textureId;
     private SurfaceTexture surfaceTexture;
@@ -69,6 +70,15 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
 
     void setRotation(float[] rowMajor3x3) {
         rot = rowMajor3x3;
+    }
+
+    /** §1.12 values take effect on the next frame; no shader rebuild needed. */
+    void setCalib(CalibParams params) {
+        calib = params;
+    }
+
+    CalibParams calib() {
+        return calib;
     }
 
     /** Recenter holds the last decoded frame on screen while the world rotates. */
@@ -111,6 +121,8 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
         surface = new Surface(surfaceTexture);
         p360 = new Projection360();
         psbs = new ProjectionSbs();
+        p360.setCalib(calib);
+        psbs.setCalib(calib);
         quad = createQuad();
         fpsStartMs = SystemClockCompat.now();
         fpsStartDrawn = drawnFrames;
@@ -156,11 +168,13 @@ final class StereoRenderer implements GLSurfaceView.Renderer {
         float[] r = rot;
 
         if (panorama) {
+            p360.setCalib(calib);
             GLES20.glViewport(0, 0, halfW, viewHeight);
             p360.draw(textureId, texMatrix, r, eyeAspect, 0, quad);
             GLES20.glViewport(halfW, 0, viewWidth - halfW, viewHeight);
             p360.draw(textureId, texMatrix, r, eyeAspect, 1, quad);
         } else {
+            psbs.setCalib(calib);
             int vw = decoder != null ? decoder.width : 0;
             int vh = decoder != null ? decoder.height : 0;
             GLES20.glViewport(0, 0, halfW, viewHeight);
