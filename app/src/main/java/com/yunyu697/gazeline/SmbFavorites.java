@@ -10,41 +10,51 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Starred SMB folders (paths relative to the single configured share). Stored
- * as a string set so one tap in the phone browser or the VR browser jumps
- * straight into a folder.
+ * Starred SMB folders. Keys carry the endpoint (host/share) so the same
+ * folder name on two servers never mixes up, while the UI keeps showing the
+ * plain relative path. Stored as a string set so one tap in the phone browser
+ * or the VR browser jumps straight into a folder.
  */
 final class SmbFavorites {
 
     private static final String PREFS = "gazeline_smb_favorites";
-    private static final String KEY_PATHS = "paths";
+    /** 1.0.x keys: a bare relative path with no server attached. */
+    private static final String KEY_LEGACY = "paths";
+    private static final String KEY_PATHS = "paths_v2";
 
     private SmbFavorites() {
     }
 
-    static List<String> list(Context context) {
-        List<String> out = new ArrayList<>(load(context));
+    /** Directories visible for the active server, as plain relative paths. */
+    static List<String> list(Context context, SmbSettings settings) {
+        List<String> out = new ArrayList<>();
+        String scope = scope(settings);
+        for (String key : load(context, settings)) {
+            if (key.startsWith(scope)) {
+                out.add(key.substring(scope.length()));
+            }
+        }
         Collections.sort(out, String.CASE_INSENSITIVE_ORDER);
         return out;
     }
 
-    static boolean contains(Context context, String dir) {
-        return load(context).contains(normalize(dir));
+    static boolean contains(Context context, SmbSettings settings, String dir) {
+        return load(context, settings).contains(fullKey(settings, dir));
     }
 
-    static boolean toggle(Context context, String dir) {
-        String path = normalize(dir);
-        Set<String> paths = load(context);
-        if (!paths.remove(path)) {
-            paths.add(path);
+    static boolean toggle(Context context, SmbSettings settings, String dir) {
+        String key = fullKey(settings, dir);
+        Set<String> paths = load(context, settings);
+        if (!paths.remove(key)) {
+            paths.add(key);
         }
         save(context, paths);
-        return paths.contains(path);
+        return paths.contains(key);
     }
 
-    static void remove(Context context, String dir) {
-        Set<String> paths = load(context);
-        if (paths.remove(normalize(dir))) {
+    static void remove(Context context, SmbSettings settings, String dir) {
+        Set<String> paths = load(context, settings);
+        if (paths.remove(fullKey(settings, dir))) {
             save(context, paths);
         }
     }
@@ -70,10 +80,30 @@ final class SmbFavorites {
         return p;
     }
 
-    private static Set<String> load(Context context) {
+    private static String scope(SmbSettings settings) {
+        return settings.host + "/" + settings.share + "/";
+    }
+
+    private static String fullKey(SmbSettings settings, String dir) {
+        return scope(settings) + normalize(dir);
+    }
+
+    private static Set<String> load(Context context, SmbSettings settings) {
         SharedPreferences p = context.getApplicationContext()
                 .getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        return new HashSet<>(p.getStringSet(KEY_PATHS, Collections.<String>emptySet()));
+        Set<String> paths = new HashSet<>(p.getStringSet(KEY_PATHS, Collections.<String>emptySet()));
+        Set<String> legacy = p.getStringSet(KEY_LEGACY, null);
+        if (legacy != null && !legacy.isEmpty()) {
+            // Attach the 1.0.x bare paths to the server configured right now;
+            // that is the only server they could have come from.
+            String scope = scope(settings);
+            for (String old : legacy) {
+                paths.add(scope + normalize(old));
+            }
+            save(context, paths);
+            p.edit().remove(KEY_LEGACY).apply();
+        }
+        return paths;
     }
 
     private static void save(Context context, Set<String> paths) {

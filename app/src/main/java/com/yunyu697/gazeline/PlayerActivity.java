@@ -1038,6 +1038,7 @@ public class PlayerActivity extends Activity
     private static final int BROW_KIND_DIR = 1;
     private static final int BROW_KIND_VIDEO = 2;
     private static final int BROW_KIND_FAV = 3;
+    private static final int BROW_KIND_SERVER = 4;
     private static final int BROWSER_PAGE_SIZE = 5;
 
     private void openBrowser() {
@@ -1103,8 +1104,11 @@ public class PlayerActivity extends Activity
                         }
                         browserLoading = false;
                         if (result == null) {
+                            // Still build rows: the server switcher must stay
+                            // reachable when this record is down.
+                            buildBrowserRows(settings,
+                                    new java.util.ArrayList<SmbConnection.Entry>());
                             browserHint = "连接失败 · 检查网段 / 445 / 账号";
-                            browserRows.clear();
                         } else {
                             buildBrowserRows(settings, result);
                         }
@@ -1118,8 +1122,18 @@ public class PlayerActivity extends Activity
     private void buildBrowserRows(SmbSettings settings, java.util.List<SmbConnection.Entry> entries) {
         browserRows.clear();
         String root = SmbFavorites.normalize(settings.path);
+        // The switcher stays on page 1, not just at the root, so an
+        // unreachable record can still be swapped for another one.
+        java.util.List<SmbSettings.Profile> saved = SmbSettings.profiles(this);
+        BrowserRow server = new BrowserRow();
+        server.kind = BROW_KIND_SERVER;
+        server.title = "服务器：" + SmbSettings.profileLabel(settings.profileName);
+        server.detail = saved.size() > 1
+                ? "切换到下一个 · 共 " + saved.size() + " 条"
+                : "手机端可添加多条记录";
+        browserRows.add(server);
         if (browserDir.equals(root)) {
-            for (String fav : SmbFavorites.list(this)) {
+            for (String fav : SmbFavorites.list(this, settings)) {
                 if (fav.length() == 0) {
                     continue;
                 }
@@ -1207,7 +1221,9 @@ public class PlayerActivity extends Activity
                     return;
                 }
                 BrowserRow row = browserRows.get(t.index);
-                if (row.kind == BROW_KIND_VIDEO) {
+                if (row.kind == BROW_KIND_SERVER) {
+                    cycleServer();
+                } else if (row.kind == BROW_KIND_VIDEO) {
                     playFromBrowser(row);
                 } else {
                     browserHint = "";
@@ -1248,6 +1264,32 @@ public class PlayerActivity extends Activity
         }
     }
 
+    /** Gaze on the server row: rotate to the next saved record and reconnect. */
+    private void cycleServer() {
+        SmbSettings settings = SmbSettings.load(this);
+        java.util.List<SmbSettings.Profile> saved = SmbSettings.profiles(this);
+        if (saved.size() <= 1) {
+            browserHint = "只有一个记录 · 在手机端「设置」里添加";
+            rebuildBrowser();
+            return;
+        }
+        int index = 0;
+        for (int i = 0; i < saved.size(); i++) {
+            if (saved.get(i).name.equals(settings.profileName)) {
+                index = i;
+                break;
+            }
+        }
+        SmbSettings.Profile next = saved.get((index + 1) % saved.size());
+        if (!settings.selectProfile(this, next.name)) {
+            return;
+        }
+        browserDir = SmbFavorites.normalize(settings.path);
+        browserPage = 0;
+        loadBrowserDir(settings, browserDir);
+        browserHint = "已切换服务器 · " + next.name;
+    }
+
     private void playFromBrowser(BrowserRow row) {
         SmbSettings settings = SmbSettings.load(this);
         String source = settings.url(row.path);
@@ -1270,7 +1312,8 @@ public class PlayerActivity extends Activity
         if (!settings.isConfigured()) {
             return "SMB 未配置";
         }
-        return settings.share + (browserDir.length() == 0 ? "" : "/" + browserDir);
+        return SmbSettings.profileLabel(settings.profileName) + " · "
+                + settings.share + (browserDir.length() == 0 ? "" : "/" + browserDir);
     }
 
     private static String parentOf(String path) {

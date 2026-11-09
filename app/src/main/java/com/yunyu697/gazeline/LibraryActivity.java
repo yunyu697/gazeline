@@ -59,11 +59,16 @@ public class LibraryActivity extends Activity {
 
     private LinearLayout listPage;
     private LinearLayout settingsPage;
+    private LinearLayout cols;
+    private LinearLayout colA;
+    private LinearLayout colB;
     private ListView list;
     private TextView pathView;
     private TextView starView;
     private TextView modeView;
     private TextView statusView;
+    private LinearLayout profileList;
+    private EditText nameField;
     private EditText hostField;
     private EditText shareField;
     private EditText dirField;
@@ -151,7 +156,7 @@ public class LibraryActivity extends Activity {
                     showSettings();
                     return;
                 }
-                boolean starred = SmbFavorites.toggle(LibraryActivity.this, dir);
+                boolean starred = SmbFavorites.toggle(LibraryActivity.this, settings, dir);
                 refreshStar();
                 refreshRows();
                 toast(starred ? "已收藏 " + SmbFavorites.displayName(dir)
@@ -172,6 +177,12 @@ public class LibraryActivity extends Activity {
 
         pathView = label("", 11.5f, C_DIM);
         pathView.setPadding(dp(18), 0, dp(18), dp(6));
+        pathView.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showSettings();
+            }
+        });
         root.addView(pathView);
 
         statusView = label("", 11.5f, C_AMBER);
@@ -219,10 +230,22 @@ public class LibraryActivity extends Activity {
         form.setOrientation(LinearLayout.VERTICAL);
         form.setPadding(dp(20), dp(6), dp(20), dp(20));
 
-        TextView intro = label("SMB 配置 · 保存后会一直保留，下次打开自动填入。\n"
+        TextView intro = label("每台服务器保存为一条记录，可自定义名称，换服务器时一键切换。\n"
                 + "账号密码只存在本机，不会写进日志或字幕。", 12, C_DIM);
         intro.setPadding(0, 0, 0, dp(8));
         form.addView(intro);
+
+        TextView savedTitle = label("已保存的服务器", 12, C_FAINT);
+        savedTitle.setPadding(0, dp(4), 0, dp(2));
+        form.addView(savedTitle);
+
+        profileList = new LinearLayout(this);
+        profileList.setOrientation(LinearLayout.VERTICAL);
+        form.addView(profileList);
+
+        nameField = field("记录名称（可自定义，留空自动命名）", settings.profileName,
+                InputType.TYPE_CLASS_TEXT);
+        form.addView(nameField);
 
         hostField = field("服务器地址（如 192.168.1.10）", settings.host,
                 InputType.TYPE_CLASS_TEXT);
@@ -232,26 +255,18 @@ public class LibraryActivity extends Activity {
         passField = field("密码", settings.password,
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
 
-        // Landscape stacks the five fields into two columns so the form fits
-        // without scrolling; portrait keeps the single column.
-        LinearLayout colA = form;
-        LinearLayout colB = form;
-        if (isLandscape()) {
-            LinearLayout cols = new LinearLayout(this);
-            cols.setOrientation(LinearLayout.HORIZONTAL);
-            colA = new LinearLayout(this);
-            colA.setOrientation(LinearLayout.VERTICAL);
-            colB = new LinearLayout(this);
-            colB.setOrientation(LinearLayout.VERTICAL);
-            LinearLayout.LayoutParams lpA = new LinearLayout.LayoutParams(0,
-                    LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-            LinearLayout.LayoutParams lpB = new LinearLayout.LayoutParams(0,
-                    LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-            lpB.leftMargin = dp(22);
-            cols.addView(colA, lpA);
-            cols.addView(colB, lpB);
-            form.addView(cols);
-        }
+        // Two columns when the window is wide, one when it is tall; re-applied
+        // on rotation because this activity handles orientation changes itself.
+        cols = new LinearLayout(this);
+        colA = new LinearLayout(this);
+        colA.setOrientation(LinearLayout.VERTICAL);
+        colB = new LinearLayout(this);
+        colB.setOrientation(LinearLayout.VERTICAL);
+        cols.addView(colA);
+        cols.addView(colB);
+        applyFormOrientation();
+        form.addView(cols);
+
         colA.addView(hostField);
         colA.addView(shareField);
         colA.addView(dirField);
@@ -275,7 +290,9 @@ public class LibraryActivity extends Activity {
                     toast("服务器地址、共享名、账号不能为空");
                     return;
                 }
-                settings.save(LibraryActivity.this);
+                settings.saveProfile(LibraryActivity.this, valueOf(nameField));
+                nameField.setText(settings.profileName);
+                toast("已保存记录「" + SmbSettings.profileLabel(settings.profileName) + "」");
                 dir = settings.path;
                 showList();
                 loadDir(dir);
@@ -306,11 +323,105 @@ public class LibraryActivity extends Activity {
     private void showSettings() {
         settingsPage.setVisibility(View.VISIBLE);
         listPage.setVisibility(View.GONE);
+        fillForm();
+        refreshProfiles();
+    }
+
+    private void fillForm() {
+        nameField.setText(settings.profileName);
         hostField.setText(settings.host);
         shareField.setText(settings.share);
         dirField.setText(settings.path);
         userField.setText(settings.user);
         passField.setText(settings.password);
+    }
+
+    /** Saved servers: one tap to switch, one tap to delete, active marked. */
+    private void refreshProfiles() {
+        if (profileList == null) {
+            return;
+        }
+        profileList.removeAllViews();
+        List<SmbSettings.Profile> saved = SmbSettings.profiles(this);
+        if (saved.isEmpty()) {
+            TextView empty = label("还没有记录 · 填好后点「保存并连接」创建第一条",
+                    11.5f, C_FAINT);
+            empty.setPadding(0, dp(4), 0, dp(8));
+            profileList.addView(empty);
+            return;
+        }
+        for (final SmbSettings.Profile profile : saved) {
+            final boolean active = profile.name.equals(settings.profileName);
+
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, dp(6), 0, dp(6));
+
+            LinearLayout text = new LinearLayout(this);
+            text.setOrientation(LinearLayout.VERTICAL);
+            text.addView(label((active ? "● " : "○ ") + profile.name, 13.5f,
+                    active ? C_AMBER : C_TEXT));
+            TextView meta = label(profile.summary(), 11, C_DIM);
+            meta.setSingleLine(true);
+            meta.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+            text.addView(meta);
+            row.addView(text, new LinearLayout.LayoutParams(0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+            TextView use = action(active ? "当前" : "使用");
+            use.setPadding(dp(12), dp(6), dp(12), dp(6));
+            use.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    switchTo(profile.name);
+                }
+            });
+            row.addView(use);
+
+            TextView del = action("删除");
+            del.setTextColor(C_DIM);
+            del.setPadding(dp(12), dp(6), dp(4), dp(6));
+            del.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    deleteProfile(profile.name);
+                }
+            });
+            row.addView(del);
+
+            profileList.addView(row);
+        }
+    }
+
+    /** One tap: load the record and connect straight away. */
+    private void switchTo(String name) {
+        if (!name.equals(settings.profileName) && !settings.selectProfile(this, name)) {
+            return;
+        }
+        fillForm();
+        refreshProfiles();
+        dir = SmbFavorites.normalize(settings.path);
+        toast("已切换到「" + SmbSettings.profileLabel(settings.profileName) + "」");
+        showList();
+        loadDir(dir);
+    }
+
+    private void deleteProfile(String name) {
+        boolean wasActive = name.equals(settings.profileName);
+        if (!settings.deleteProfile(this, name)) {
+            return;
+        }
+        if (wasActive) {
+            List<SmbSettings.Profile> rest = SmbSettings.profiles(this);
+            if (!rest.isEmpty() && settings.selectProfile(this, rest.get(0).name)) {
+                fillForm();
+            } else {
+                nameField.setText("");
+            }
+        }
+        refreshProfiles();
+        toast("已删除「" + name + "」");
     }
 
     private void showList() {
@@ -385,7 +496,7 @@ public class LibraryActivity extends Activity {
         local.clickable = true;
         add(local);
 
-        List<String> favorites = SmbFavorites.list(this);
+        List<String> favorites = SmbFavorites.list(this, settings);
         if (!favorites.isEmpty()) {
             Row header = new Row();
             header.type = ROW_HEADER;
@@ -573,10 +684,11 @@ public class LibraryActivity extends Activity {
 
     private String where() {
         if (!settings.isConfigured()) {
-            return "尚未配置 SMB";
+            return "尚未配置 SMB · 点此添加服务器";
         }
         String path = dir.length() == 0 ? "" : "/" + dir;
-        return settings.share + path + " · " + settings.host;
+        return SmbSettings.profileLabel(settings.profileName) + " · "
+                + settings.share + path + " · " + settings.host + " · 点此切换";
     }
 
     private void refreshMode() {
@@ -589,7 +701,7 @@ public class LibraryActivity extends Activity {
         if (starView == null) {
             return;
         }
-        boolean starred = settings.isConfigured() && SmbFavorites.contains(this, dir);
+        boolean starred = settings.isConfigured() && SmbFavorites.contains(this, settings, dir);
         starView.setText(starred ? "★" : "☆");
         starView.setTextColor(starred ? C_AMBER : C_DIM);
     }
@@ -701,6 +813,30 @@ public class LibraryActivity extends Activity {
     private boolean isLandscape() {
         return getResources().getConfiguration().orientation
                 == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+    }
+
+    /** Wide window: two field columns; narrow window: one stacked column. */
+    private void applyFormOrientation() {
+        if (cols == null) {
+            return;
+        }
+        boolean land = isLandscape();
+        cols.setOrientation(land ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams a = new LinearLayout.LayoutParams(
+                land ? 0 : LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT, land ? 1f : 0f);
+        LinearLayout.LayoutParams b = new LinearLayout.LayoutParams(
+                land ? 0 : LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT, land ? 1f : 0f);
+        b.leftMargin = land ? dp(22) : 0;
+        colA.setLayoutParams(a);
+        colB.setLayoutParams(b);
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        applyFormOrientation();
     }
 
     // ------------------------------------------------------------- adapter

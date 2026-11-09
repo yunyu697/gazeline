@@ -830,32 +830,18 @@ public class StageView extends View {
         float y = eye.bottom + 22 * dp;
         txt(c, "外层 HUD · 头锁定（屏幕空间层）", x, y, 13 * dp, 0xFFDCE6F7, tfMed, Paint.Align.LEFT);
 
-        y += 22 * dp;
+        y += 20 * dp;
         String[] lines = {
                 "控件行 pitch −18°：字幕 −30° · −10 s −16° · 播放 0° · +10 s +16° · 菜单 +30°",
-                "点播中央播放键 → 选 360 全景 / SBS 3D / SMB 片库 → 本地或局域网视频（M2 管线）",
-                "回中键 (−37°, −25°) Ø7.5° · L2 1.8 s（1.2 s 充能 + 0.6 s 待发）· 随 HUD 一起显隐",
-                "唤醒条 25°×3° @ −39° · 字幕 @ −33° · 与字幕带、快退键中心距均满足 ≥ 2° 隔离"
+                "回中键 (−37°, −25°) Ø7.5° · L2 1.8 s → 3.5 s 调整姿态 → 按当前朝向重置",
+                "唤醒条 25°×3° @ −39° · 命中区 64°×16° · 停留 0.38 s 唤回",
+                "进入 0.85R / 离开 1.15R · 去抖 120 ms · 聚焦 150 ms · 250 ms 预备"
         };
         for (String s : lines) {
-            txt(c, s, x, y, 10.6f * dp, 0xFF93A2BA, tfReg, Paint.Align.LEFT);
-            y += 18 * dp;
+            txt(c, s, x, y, 10.2f * dp, 0xFF93A2BA, tfReg, Paint.Align.LEFT);
+            y += 16 * dp;
         }
-
-        RectF card = new RectF(x, y + 4 * dp, W - x, y + 48 * dp);
-        p.setColor(0x0FFFFFFF);
-        c.drawRoundRect(card, 10 * dp, 10 * dp, p);
-        p.setStyle(Paint.Style.STROKE);
-        p.setStrokeWidth(1);
-        p.setColor(0x1FFFFFFF);
-        c.drawRoundRect(card, 10 * dp, 10 * dp, p);
-        p.setStyle(Paint.Style.FILL);
-
-        txt(c, "进入 0.85R / 离开 1.15R · 120 ms 去抖 · 150 ms 聚焦 · 250 ms 预备",
-                card.left + 12 * dp, card.top + 17 * dp, 10 * dp, 0xFFB9C4DA, tfReg, Paint.Align.LEFT);
-        txt(c, "停留 L1 1.2 / L2 1.8 / L3 2.5 s（L3 再确认）· 执行后 500 ms 冷却 · 菜单 400 ms 保护",
-                card.left + 12 * dp, card.top + 34 * dp, 9.2f * dp, 0xFFB9C4DA, tfReg, Paint.Align.LEFT);
-        chromeBottom = card.bottom;
+        chromeBottom = y + 4 * dp;
     }
 
     // ---------------------------------------------------------------- S5 calibration
