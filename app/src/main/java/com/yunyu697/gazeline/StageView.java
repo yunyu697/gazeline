@@ -23,6 +23,7 @@ public class StageView extends View {
     public static final int SCR_SPLASH = 0;
     public static final int SCR_HUD = 1;
     public static final int SCR_CALIB = 2;
+    public static final int SCR_ABOUT = 3;
 
     private static final float FOV = 90f;
 
@@ -49,7 +50,7 @@ public class StageView extends View {
     private final Path clipPath = new Path();
     private final RectF eye = new RectF();
     private final RectF chrome = new RectF();
-    private final RectF[] zones = {new RectF(), new RectF(), new RectF()};
+    private final RectF[] zones = {new RectF(), new RectF(), new RectF(), new RectF()};
     private final RectF wakeZone = new RectF();
     private final RectF undoZone = new RectF();
     private final RectF openZone = new RectF();
@@ -135,7 +136,7 @@ public class StageView extends View {
     }
 
     public boolean back() {
-        if (screen == SCR_CALIB) {
+        if (screen == SCR_CALIB || screen == SCR_ABOUT) {
             screen = SCR_HUD;
             invalidate();
             return true;
@@ -162,8 +163,8 @@ public class StageView extends View {
         float barH = 62 * dp;
         float barY = H - 16 * dp - barH;
         chrome.set(16 * dp, barY, W - 16 * dp, barY + barH);
-        float cell = chrome.width() / 3f;
-        for (int i = 0; i < 3; i++) {
+        float cell = chrome.width() / 4f;
+        for (int i = 0; i < 4; i++) {
             zones[i].set(chrome.left + i * cell, chrome.top, chrome.left + (i + 1) * cell, chrome.bottom);
         }
         wakeZone.set(X(-12.5f), Y(-40.5f), X(12.5f), Y(-37.5f));
@@ -188,6 +189,8 @@ public class StageView extends View {
             drawSplash(c);
         } else if (screen == SCR_HUD) {
             drawHudScreen(c);
+        } else if (screen == SCR_ABOUT) {
+            drawAboutScreen(c);
         } else {
             drawCalibScreen(c);
         }
@@ -308,7 +311,8 @@ public class StageView extends View {
 
         drawHudChrome(c);
         drawOpenEntry(c);
-        drawBar(c, new String[]{"HUD 预览", "S5 校准", hudVisible ? "收起 HUD" : "叫回 HUD"}, 0);
+        drawBar(c, new String[]{"HUD 预览", "S5 校准",
+                hudVisible ? "收起 HUD" : "叫回 HUD", "关于"}, 0);
         if (undoPath != null) {
             drawUndo(c);
         }
@@ -650,7 +654,7 @@ public class StageView extends View {
         p.setStyle(Paint.Style.FILL);
 
         drawCalibForm(c);
-        drawBar(c, new String[]{"HUD 预览", "S5 校准", "恢复出厂"}, 1);
+        drawBar(c, new String[]{"HUD 预览", "S5 校准", "恢复出厂", "关于"}, 1);
     }
 
     private void drawTestCard(Canvas c) {
@@ -872,6 +876,87 @@ public class StageView extends View {
         }
     }
 
+    // ---------------------------------------------------------------- about
+
+    private void drawAboutScreen(Canvas c) {
+        p.setStyle(Paint.Style.FILL);
+        p.setShader(new LinearGradient(0, 0, 0, H,
+                new int[]{0xFF0B1220, 0xFF05070A}, null, Shader.TileMode.CLAMP));
+        c.drawRect(0, 0, W, H, p);
+        p.setShader(null);
+
+        tp.setLetterSpacing(0.18f);
+        txt(c, "GAZELINE", W / 2f, H * 0.10f, W * 0.062f, 0xFFF4F8FF, tfLight, Paint.Align.CENTER);
+        tp.setLetterSpacing(0.22f);
+        txt(c, "CARDBOARD VR PLAYER", W / 2f, H * 0.132f, 10.5f * dp, 0xFF8FA0BA, tfReg, Paint.Align.CENTER);
+        tp.setLetterSpacing(0f);
+        txt(c, versionText(), W / 2f, H * 0.165f, 12 * dp, 0xFF67E8F9, tfMed, Paint.Align.CENTER);
+
+        float cardTop = H * 0.205f;
+        // Card hugs the content instead of stretching to the bottom bar.
+        float contentDp = 30 + 26 + 3 * 22 + 34 + 22 + 5 * 19 + 32 + 22 + 18;
+        float cardBottom = cardTop + contentDp * dp;
+        p.setColor(0xCC0E131C);
+        c.drawRoundRect(24 * dp, cardTop, W - 24 * dp, cardBottom, 22 * dp, 22 * dp, p);
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(1);
+        p.setColor(0x1FFFFFFF);
+        c.drawRoundRect(24 * dp, cardTop, W - 24 * dp, cardBottom, 22 * dp, 22 * dp, p);
+        p.setStyle(Paint.Style.FILL);
+
+        float left = 40 * dp;
+        float y = cardTop + 30 * dp;
+        txt(c, "ABOUT", left, y, 10 * dp, 0xFF7A8DA8, tfMed, Paint.Align.LEFT);
+        y += 26 * dp;
+        txt(c, "Android 手机 + Cardboard 卡纸盒的 VR 视频播放器", left, y, 12 * dp,
+                0xFFDDE6F3, tfReg, Paint.Align.LEFT);
+        y += 22 * dp;
+        txt(c, "360° 全景 / SBS 3D；播放与校准页内全部操作由凝视完成", left, y, 12 * dp,
+                0xFFDDE6F3, tfReg, Paint.Align.LEFT);
+        y += 22 * dp;
+        txt(c, "片源：本地存储 / SMB2-3 局域网共享（强制签名）", left, y, 12 * dp,
+                0xFFDDE6F3, tfReg, Paint.Align.LEFT);
+
+        y += 34 * dp;
+        txt(c, "开源组件", left, y, 10 * dp, 0xFF7A8DA8, tfMed, Paint.Align.LEFT);
+        y += 22 * dp;
+        txt(c, "smbj 0.15.0 · SMB2/3 客户端 · Apache-2.0", left, y, 11 * dp,
+                0xFFA7B2C7, tfReg, Paint.Align.LEFT);
+        y += 19 * dp;
+        txt(c, "asn-one 0.6.0 · ASN.1 · Apache-2.0", left, y, 11 * dp,
+                0xFFA7B2C7, tfReg, Paint.Align.LEFT);
+        y += 19 * dp;
+        txt(c, "mbassador 1.3.2 · 事件总线 · Apache-2.0", left, y, 11 * dp,
+                0xFFA7B2C7, tfReg, Paint.Align.LEFT);
+        y += 19 * dp;
+        txt(c, "Bouncy Castle 1.85.2 · NTLM 加密 · MIT-style", left, y, 11 * dp,
+                0xFFA7B2C7, tfReg, Paint.Align.LEFT);
+        y += 19 * dp;
+        txt(c, "slf4j-api 2.0.18 · 日志门面 · MIT", left, y, 11 * dp,
+                0xFFA7B2C7, tfReg, Paint.Align.LEFT);
+
+        y += 32 * dp;
+        txt(c, "第三方组件只用于局域网串流，不上传视频或账号。", left, y, 11 * dp,
+                0xFF9FB0C6, tfReg, Paint.Align.LEFT);
+        y += 22 * dp;
+        txt(c, buildLine(), left, y, 10.5f * dp, 0xFF6F8099, tfReg, Paint.Align.LEFT);
+
+        txt(c, "底部「返回」回到 HUD", W / 2f, cardBottom + 26 * dp, 10.5f * dp,
+                0xFF6F8099, tfReg, Paint.Align.CENTER);
+
+        drawBar(c, new String[]{"HUD 预览", "S5 校准", "返回", "关于"}, 3);
+    }
+
+    private String buildLine() {
+        try {
+            android.content.pm.PackageInfo info = getContext().getPackageManager()
+                    .getPackageInfo(getContext().getPackageName(), 0);
+            return "包名 " + getContext().getPackageName() + " · versionCode " + info.versionCode;
+        } catch (Throwable t) {
+            return "包名 com.yunyu697.gazeline";
+        }
+    }
+
     // ---------------------------------------------------------------- shared chrome
 
     private void drawBar(Canvas c, String[] labels, int selected) {
@@ -883,7 +968,7 @@ public class StageView extends View {
         c.drawRoundRect(chrome, 30 * dp, 30 * dp, p);
         p.setStyle(Paint.Style.FILL);
 
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < labels.length; i++) {
             RectF z = zones[i];
             if (i == selected) {
                 p.setColor(0x1FFFB454);
@@ -988,7 +1073,17 @@ public class StageView extends View {
                 invalidate();
                 return true;
             }
+            if (zones[3].contains(x, y)) {
+                screen = SCR_ABOUT;
+                invalidate();
+                return true;
+            }
             if (zones[2].contains(x, y)) {
+                if (screen == SCR_ABOUT) {
+                    screen = SCR_HUD;
+                    invalidate();
+                    return true;
+                }
                 if (screen == SCR_CALIB) {
                     CalibParams cp = calibParams();
                     cp.resetToModel(CalibParams.MODEL_GENERIC);
