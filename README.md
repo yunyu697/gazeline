@@ -6,7 +6,7 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 
 已知限制：launcher label 是 8 个拉丁字母，默认 4 列图标网格可完整显示；大字体或 5 列网格下可能被省略号截断。不通过缩小字号或改名规避。
 
-> 当前为 alpha 阶段（版本号以 `version.txt` 为准）：本地视频播放、音轨播放、外挂 SRT/VTT 字幕、凝视控制与 S5 两段式校准（步进 / 保存 / 回滚）是真实功能；校准参数对画面几何的影响、SMB 与 72 Hz 仍待后续版本或真机验证。
+> 当前为 alpha 阶段（版本号以 `version.txt` 为准）：本地视频播放、音轨播放、外挂 SRT/VTT 字幕、凝视控制与 S5 两段式校准（步进 / 保存 / 回滚）是真实功能；校准参数对画面几何的影响、SMB 与真机 72 Hz 仍待后续版本或真机验证。
 
 ## 当前完成度
 
@@ -33,6 +33,7 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 | SBS 管线 | 独立 `ProjectionSbs`：垂直 FOV 85°（水平约 90°）、k1 -0.26、k2 0.045、虚拟屏宽 70°，左右半幅各取一半 + 预畸变 |
 | 播放控制 | 播放/暂停、±10 s 跳转（`positionUs` 与时间轴同步）；字幕键切换字幕开关 |
 | 字幕（alpha10） | 手机端选片后可选同名 `.srt` / `.vtt` 字幕（也可跳过）；`SubtitleTrack` 解析时间轴，按解码位置取当前 cue，`HudView` 在字幕带 @-33° 按左右眼各绘一份，最多 2 行、超宽自动换行+省略；字幕是内容层，HUD 淡出后仍保留；无字幕文件时保持原「暂无字幕轨」提示 |
+| 显示刷新（alpha11） | 进播放器时通过 `WindowManager.LayoutParams.preferredDisplayModeId` 请求 72 Hz（同分辨率优先，90 Hz 兜底）；手机不暴露这些模式时保持系统模式，HUD 顶部状态提示实际结果（模拟器实测为 60 Hz 兜底）；GL 连续渲染跟随显示 vsync |
 | 音轨播放（alpha9） | 同一来源的音频轨（第 1 条，可循环切换）→ MediaCodec AAC/其他 → `AudioTrack` 44.1/48 kHz 流式播放；音频播放头作为主时钟，视频按帧 PTS 追音频；暂停/恢复/跳转同时作用于两轨；文件无音轨时静默、不报错，菜单音轨行显示「无」 |
 | 调试 HUD | 文件名 / 格式 / 分辨率 / 进度 / 实际 codec 写在顶部两枚状态卡片，不再单独占用一行 |
 
@@ -52,6 +53,7 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 - 音轨（alpha9，模拟器）：H.264 1280×720 + 双 AAC 44.1 kHz 立体声轨测试片，日志 `AudioTrack 44100Hz ch=2 enc=2`、`c2.android.aac.decoder`；`dumpsys audio` 显示 `state:started`、`channelMask=0x3, sampleRate=44100`。连续播放约 3.5 分钟，视频与音频各自循环 17 次，循环点相差 15–30 ms（视频先 `seek 0`，音频 `drainTail` 播完尾音后跟到）。带 `--el position 5000` 启动时，视频与音频都执行 `seek 5000ms`。纯视频文件日志为 `source has no audio track, staying silent`，无异常、无 AudioTrack、无错误提示。
 - 音轨切换、倍速静音与暂停/恢复的音频侧：代码路径与视频共用 `renderer.pause/resume/seek/setSpeed`，但模拟器上用拖拽把视点精确停到菜单/暂停键的成功率不稳定，**未实测**（见下）。
 - 字幕（alpha10，模拟器）：视频旁放同名 `test_av_2audio.srt`（含单行、双行、循环末尾三类 cue），启动后自动探测并默认开启；2 s 截图显示第一段中文 cue，5 s 截图显示第二段双行 cue（两行都在字幕带内、左右眼各一份），循环回 0 后再次出现；无字幕文件时不加载、无错误提示。字幕开关的凝视点击（HUD 字幕键 / 菜单字幕行）**未实测**，默认开启已覆盖主要观看路径。
+- 72 Hz（alpha11，模拟器）：`GazelineDisplay: no 72/90Hz mode exposed, keep 60.000004Hz 1080x2400`，启动状态提示「显示 60 Hz · 本机未暴露 72/90 Hz」，视频与字幕照常播放；真机 72/90 Hz 模式的实际切换**未实测**。
 
 **未实现（不要在演示中当成可用功能）：**
 
@@ -60,7 +62,8 @@ Android 手机 + Cardboard 卡纸盒的 VR 视频播放器。核心交互是**�
 - 倍速下的音频变速：0.5–2.0× 时音轨静音（占位）；回到 1.0× 重新对齐视频位置
 - 音轨切换/暂停/恢复的音频侧未在模拟器实测；真机耳机输出与延迟未验
 - SMB 串流、关于页
-- 72 Hz 刷新、长时间耐力测试
+- 72 Hz 真机验证（模拟器只暴露 60 Hz；已在 72/90 Hz 的手机上自动请求，未实测切换结果）
+- 长时间耐力测试
 - 校准参数的**画面侧效果**（IPD→SBS 窗口偏移、每眼 Y 偏移）只做到每帧下发 uniform；模拟器无法打开视频源核对，真机待验
 
 启动页与选片仍靠点屏幕；S5 的「开始校准」也是戴前的一次触摸（这是规格要求：戴前输入、戴后全程凝视）。**进入播放器和校准页后，HUD 全部走凝视**。所有角度按 90° 单眼 FOV 定义，像素值随设备换算。
@@ -148,6 +151,7 @@ app/src/main/java/com/yunyu697/gazeline/
   VideoDecoder.java      MediaCodec 解码线程：暂停、跳转、循环
   AudioPlayer.java       音频轨解码 → AudioTrack：AudioTrack 播放头作主时钟、暂停/跳转/循环
   SubtitleTrack.java     SRT/VTT 解析、按位置取 cue、同名 sidecar 探测
+  DisplayModes.java      请求 72 Hz / 90 Hz 同分辨率显示模式，其他保持系统模式
   StereoRenderer.java    GL 双视口渲染与画面冻结
   Projection360.java     360° 管线
   ProjectionSbs.java     SBS 管线

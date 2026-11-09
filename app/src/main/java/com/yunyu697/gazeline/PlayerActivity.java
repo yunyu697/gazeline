@@ -98,6 +98,7 @@ public class PlayerActivity extends Activity
     private SubtitleTrack subtitleTrack;
     private String subtitleSource;
     private boolean subtitleLoading;
+    private String displayMode = "";
     private boolean sensorPrimed;
     private String statusText = "";
     private long statusUntil;
@@ -148,6 +149,7 @@ public class PlayerActivity extends Activity
                         | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                         | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        displayMode = DisplayModes.request(this);
 
         dataSource = getIntent().getStringExtra(EXTRA_PATH);
         if (dataSource == null || dataSource.length() == 0) {
@@ -199,6 +201,7 @@ public class PlayerActivity extends Activity
 
         sessionStartMs = SystemClock.elapsedRealtime();
         lastActivityMs = sessionStartMs;
+        showStatus("显示 " + displayMode);
         updateRotation();
         sensorPrimed = !sensorActive;
         if (!sensorActive) {
