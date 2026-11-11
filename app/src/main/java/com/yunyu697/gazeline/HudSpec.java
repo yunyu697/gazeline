@@ -16,7 +16,13 @@ final class HudSpec {
     static final long DEBOUNCE_MS = 120;
     static final long FOCUS_MS = 150;
     static final long ARM_MS = 250;
-    static final long CANCEL_GRACE_MS = 250;
+    /**
+     * Real heads are never perfectly still: sensor tremor kept leaving the
+     * tight exit radius for a moment and re-zeroing the dwell, so 1.2 s could
+     * never complete. The grace window absorbs that without making a deliberate
+     * look-away feel sticky.
+     */
+    static final long CANCEL_GRACE_MS = 450;
     static final long CANCEL_RETRACT_MS = 150;
 
     static final long L1_MS = 1200;
@@ -45,8 +51,13 @@ final class HudSpec {
     static final float SPEED_RESUME_DEG = 6f;
     static final float SPEED_CANCEL_DEG = 25f;
 
-    static final float ENTER_RATIO = 0.85f;
-    static final float EXIT_RATIO = 1.15f;
+    /**
+     * The tuned Ø8°/Ø10° sizes are kept, but the full disc counts as inside on
+     * entry and the exit ring is half-again larger, so a head that drifts a
+     * degree or two cannot bounce the dwell on and off.
+     */
+    static final float ENTER_RATIO = 1f;
+    static final float EXIT_RATIO = 1.5f;
 
     static final float ANCHOR_YAW_LIMIT = 55f;
     static final float ANCHOR_PITCH_UP_LIMIT = 40f;
@@ -61,11 +72,19 @@ final class HudSpec {
      * wide enough to aim at the ±30° row ends and the −37° recenter key.
      */
     static final float HUD_YAW_KEEP = 44f;
+    /**
+     * The panel is fixed in the world vertically. It only creeps back once the
+     * gaze is this far off, which is close to the edge of the eye view: inside
+     * that band an up/down head movement must not move the panel at all.
+     */
+    static final float HUD_PITCH_KEEP = 45f;
 
-    // Wake gesture: glance down past one of these pitches to bring the HUD back.
-    static final float WAKE_PITCH_FAST = 26f;
-    static final float WAKE_PITCH_DEFAULT = 40f;
-    static final float WAKE_PITCH_DEEP = 72f;
+    // Wake gesture: the controls come back when the gaze reaches the top or the
+    // bottom band of the frame, so the threshold is an angle from the video
+    // centre and both directions share it.
+    static final float WAKE_PITCH_FAST = 20f;
+    static final float WAKE_PITCH_DEFAULT = 30f;
+    static final float WAKE_PITCH_DEEP = 46f;
 
     // ------------------------------------------------------------- colors
 
@@ -88,7 +107,14 @@ final class HudSpec {
         FORWARD,
         SUBTITLE,
         MENU,
+        FILES,
         RECENTER,
+        /** Opens the compact projection picker from the playing HUD. */
+        PROJ,
+        /** One row of that picker; the option itself rides in {@code index}. */
+        PROJ_OPTION,
+        /** The progress bar itself: gazing at it grabs and drags playback. */
+        TIMELINE,
         MENU_SUBTITLE,
         MENU_AUDIO,
         MENU_SPEED,
@@ -101,6 +127,8 @@ final class HudSpec {
         MENU_VOLUME,
         MENU_SERVER,
         MENU_SUB_STYLE,
+        MENU_PROJ,
+        MENU_PACK,
         MENU_EXIT,
         EXIT_CANCEL,
         EXIT_OK,
@@ -140,8 +168,16 @@ final class HudSpec {
                     return "字幕";
                 case MENU:
                     return "打开菜单";
+                case FILES:
+                    return "文件管理";
                 case RECENTER:
                     return "回中";
+                case PROJ:
+                    return "画面类型";
+                case PROJ_OPTION:
+                    return "画面类型";
+                case TIMELINE:
+                    return "拖动进度";
                 case MENU_SUBTITLE:
                     return "字幕";
                 case MENU_AUDIO:
@@ -166,6 +202,10 @@ final class HudSpec {
                     return "切换服务器";
                 case MENU_SUB_STYLE:
                     return "字幕样式";
+                case MENU_PROJ:
+                    return "投影";
+                case MENU_PACK:
+                    return "立体排布";
                 case BROWSER_PREV:
                     return "上一页";
                 case BROWSER_NEXT:
@@ -207,6 +247,8 @@ final class HudSpec {
         final String detail;
         /** Browser row index (-1 elsewhere). */
         final int index;
+        /** Poster frame for a browser card, decoded off the UI thread. */
+        android.graphics.Bitmap thumb;
 
         Target(Id id, float yaw, float pitch, float diameterDeg, long levelMs,
                boolean arming, boolean ring, boolean readyTwoStage) {
@@ -296,48 +338,109 @@ final class HudSpec {
     static final Target FORWARD = new Target(Id.FORWARD, 16f, -18f, 8f, L1_MS, true, true, false);
     static final Target SUBTITLE = new Target(Id.SUBTITLE, -30f, -18f, 8f, L2_MS, true, true, false);
     static final Target MENU = new Target(Id.MENU, 30f, -18f, 8f, L2_MS, true, true, false);
+    /**
+     * Direct way into the in-VR file browser: the menu still has a 文件管理
+     * row, but reaching it took two pages, so one tap on the HUD is the entry.
+     * Mirrors 回中 on the opposite corner, outside the main row's pitch.
+     */
+    static final Target FILES = new Target(Id.FILES, 37f, -25f, 7.5f, L2_MS, true, true, false);
     static final Target RECENTER = new Target(Id.RECENTER, -37f, -25f, 7.5f, L2_MS, true, true, true);
+    /**
+     * Projection picker: mirrored from 文件管理 across the centre, one step in
+     * so it clears 回中's exit ring and the subtitle key above it.
+     */
+    static final Target PROJ_T = new Target(Id.PROJ, -22f, -26.5f, 7.5f, L2_MS, true, true, false);
 
     static final Target[] ROW = {SUBTITLE, REWIND, PLAY, FORWARD, MENU};
 
-    static final Target[] PLAYING_TARGETS = {SUBTITLE, REWIND, PLAY, FORWARD, MENU, RECENTER};
+    /**
+     * The bar is a gaze target, not a button: 5° tall is the aimable band while
+     * the drawn track stays thin. Its width is the drag range: one bar width of
+     * head yaw equals the whole film.
+     */
+    static final Target TIMELINE_T = new Target(
+            Id.TIMELINE, 0f, HudSpec.BAR_PITCH, HudSpec.BAR_WIDTH, 5f, L1_MS);
+
+    static final Target[] PLAYING_TARGETS = {
+            SUBTITLE, REWIND, PLAY, FORWARD, MENU, FILES, RECENTER, PROJ_T, TIMELINE_T
+    };
+
+    // ------------------------------------------------- projection picker
+
+    static final float PROJ_W = 58f;
+    static final float PROJ_H = 58f;
+    static final float PROJ_ROW_W = 52f;
+    static final float PROJ_ROW_H = 5.6f;
+    static final float PROJ_HEADER_PITCH = 24.4f;
+    static final float PROJ_DIVIDER_PITCH = 20.9f;
+    static final float PROJ_FOOTER_PITCH = -26.5f;
+
+    private static Target projRow(float pitch, String text, String detail, int option) {
+        return new Target(Id.PROJ_OPTION, 0f, pitch, PROJ_ROW_W, PROJ_ROW_H, L1_MS,
+                text, detail, option);
+    }
+
+    /** index 0 = automatic; the rest match the presets in PlayerActivity. */
+    static final Target[] PROJ_ROWS = {
+            projRow(15.5f, "自动识别", "按文件名与画面比例判断", 0),
+            projRow(9.5f, "360° 单眼", "整球画面 · 两眼同图", 1),
+            projRow(3.5f, "360° 左右", "整球 · 左右并排两只眼", 2),
+            projRow(-2.5f, "180° 左右", "半球 · 左右并排两只眼", 3),
+            projRow(-8.5f, "180° 上下", "半球 · 上下两只眼", 4),
+            projRow(-14.5f, "平面 2D", "普通视频 · 铺满前方屏幕", 5),
+            projRow(-20.5f, "平面 左右", "左右两幅平面并排", 6),
+    };
+
+    static boolean inProjPanel(float yaw, float pitch) {
+        return Math.abs(yaw) <= PROJ_W * 0.5f && Math.abs(pitch) <= PROJ_H * 0.5f;
+    }
 
     // S4 rows: settings (L2) + file browser + isolated exit (L3).
     static final Target MENU_SUBTITLE_T = new Target(
-            Id.MENU_SUBTITLE, 0f, 22.4f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_SUBTITLE, 0f, 22.4f, 52f, 5.8f, L2_MS, true, true);
     static final Target MENU_AUDIO_T = new Target(
-            Id.MENU_AUDIO, 0f, 15.5f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_AUDIO, 0f, 16.0f, 52f, 5.8f, L2_MS, true, true);
     static final Target MENU_SPEED_T = new Target(
-            Id.MENU_SPEED, 0f, 8.6f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_SPEED, 0f, 9.6f, 52f, 5.8f, L2_MS, true, true);
     static final Target MENU_BRIGHT_T = new Target(
-            Id.MENU_BRIGHT, 0f, 1.7f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_BRIGHT, 0f, 3.2f, 52f, 5.8f, L2_MS, true, true);
     static final Target MENU_AUTO_BRIGHT_T = new Target(
-            Id.MENU_AUTO_BRIGHT, 0f, -5.2f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_AUTO_BRIGHT, 0f, -3.2f, 52f, 5.8f, L2_MS, true, true);
     static final Target MENU_WAKE_T = new Target(
-            Id.MENU_WAKE, 0f, -12.1f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_WAKE, 0f, -9.6f, 52f, 5.8f, L2_MS, true, true);
     static final Target MENU_MORE_T = new Target(
-            Id.MENU_MORE, 0f, -19.0f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_MORE, 0f, -16.0f, 52f, 5.8f, L2_MS, true, true);
+    /**
+     * Every page ends with 返回: page 1 closes the menu (back to the picture),
+     * page 2 pages back. Looking away used to be the only way out of page 1.
+     */
+    static final Target MENU_BACK_P1_T = new Target(
+            Id.MENU_BACK, 0f, -22.4f, 52f, 5.8f, L1_MS, true, true);
     static final Target MENU_VOLUME_T = new Target(
-            Id.MENU_VOLUME, 0f, 22.4f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_VOLUME, 0f, 23.4f, 52f, 6.2f, L2_MS, true, true);
+    static final Target MENU_PROJ_T = new Target(
+            Id.MENU_PROJ, 0f, 17.2f, 52f, 6.2f, L2_MS, true, true);
+    static final Target MENU_PACK_T = new Target(
+            Id.MENU_PACK, 0f, 11.0f, 52f, 6.2f, L2_MS, true, true);
     static final Target MENU_SERVER_T = new Target(
-            Id.MENU_SERVER, 0f, 15.5f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_SERVER, 0f, 4.8f, 52f, 6.2f, L2_MS, true, true);
     static final Target MENU_SUB_STYLE_T = new Target(
-            Id.MENU_SUB_STYLE, 0f, 8.6f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_SUB_STYLE, 0f, -1.4f, 52f, 6.2f, L2_MS, true, true);
     static final Target MENU_FILE_P2_T = new Target(
-            Id.MENU_FILE, 0f, 1.7f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_FILE, 0f, -7.6f, 52f, 6.2f, L2_MS, true, true);
     static final Target MENU_BACK_T = new Target(
-            Id.MENU_BACK, 0f, -5.2f, 52f, 6.2f, L1_MS, true, true);
+            Id.MENU_BACK, 0f, -13.8f, 52f, 6.2f, L1_MS, true, true);
     static final Target MENU_EXIT_T = new Target(
-            Id.MENU_EXIT, 0f, -12.1f, 52f, 6.2f, L3_MS, true, true);
+            Id.MENU_EXIT, 0f, -20.0f, 52f, 6.2f, L3_MS, true, true);
 
     /** Page 1 keeps the everyday controls; 更多设置 flips to page 2. */
     static final Target[] MENU_ROWS_P1 = {
             MENU_SUBTITLE_T, MENU_AUDIO_T, MENU_SPEED_T, MENU_BRIGHT_T,
-            MENU_AUTO_BRIGHT_T, MENU_WAKE_T, MENU_MORE_T
+            MENU_AUTO_BRIGHT_T, MENU_WAKE_T, MENU_MORE_T, MENU_BACK_P1_T
     };
     static final Target[] MENU_ROWS_P2 = {
-            MENU_VOLUME_T, MENU_SERVER_T, MENU_SUB_STYLE_T, MENU_FILE_P2_T,
-            MENU_BACK_T, MENU_EXIT_T
+            MENU_VOLUME_T, MENU_PROJ_T, MENU_PACK_T, MENU_SERVER_T,
+            MENU_SUB_STYLE_T, MENU_FILE_P2_T, MENU_BACK_T, MENU_EXIT_T
     };
 
     // Exit confirmation: default focus is cancel; confirming takes another L2.
@@ -366,32 +469,48 @@ final class HudSpec {
 
     // ------------------------------------------------------------- browser layout
 
-    static final float BROWSER_W = 66f;
-    static final float BROWSER_H = 61f;
-    static final float BROWSER_ROW_W = 58f;
-    static final float BROWSER_ROW_H = 6.2f;
-    static final float[] BROWSER_ROW_PITCH = {18.5f, 11.5f, 4.5f, -2.5f, -9.5f};
-    static final float BROWSER_HEADER_PITCH = 25.4f;
-    static final float BROWSER_PATH_PITCH = 22.6f;
-    static final float BROWSER_FOOTER1_PITCH = -16.5f;
-    static final float BROWSER_FOOTER2_PITCH = -23.5f;
-    static final float BROWSER_HINT_PITCH = -29.2f;
+    static final float BROWSER_W = 68f;
+    static final float BROWSER_H = 66f;
+    /** Card grid: four across, two down, so a page shows eight posters. */
+    static final int BROWSER_COLS = 4;
+    static final int BROWSER_ROWS = 2;
+    static final int BROWSER_PAGE_SIZE = BROWSER_COLS * BROWSER_ROWS;
+    static final float BROWSER_CARD_W = 16f;
+    static final float BROWSER_CARD_H = 17f;
+    static final float BROWSER_CARD_YAW = 17f;
+    static final float[] BROWSER_CARD_PITCH = {13f, -8f};
+    static final float BROWSER_HEADER_PITCH = 30f;
+    static final float BROWSER_PATH_PITCH = 26.6f;
+    /** One row of round icon buttons: prev · next · projection · close. */
+    static final float BROWSER_FOOTER_PITCH = -25f;
+    static final float BROWSER_BUTTON = 9f;
+    static final float BROWSER_HINT_PITCH = -31.6f;
 
     static final Target BROWSER_PREV_T = new Target(
-            Id.BROWSER_PREV, -15.5f, BROWSER_FOOTER1_PITCH, 19f, 6f, L1_MS);
+            Id.BROWSER_PREV, -25f, BROWSER_FOOTER_PITCH,
+            BROWSER_BUTTON, BROWSER_BUTTON, L1_MS);
     static final Target BROWSER_NEXT_T = new Target(
-            Id.BROWSER_NEXT, 15.5f, BROWSER_FOOTER1_PITCH, 19f, 6f, L1_MS);
+            Id.BROWSER_NEXT, -9f, BROWSER_FOOTER_PITCH,
+            BROWSER_BUTTON, BROWSER_BUTTON, L1_MS);
     static final Target BROWSER_CLOSE_T = new Target(
-            Id.BROWSER_CLOSE, -15.5f, BROWSER_FOOTER2_PITCH, 19f, 6f, L1_MS);
+            Id.BROWSER_CLOSE, 25f, BROWSER_FOOTER_PITCH,
+            BROWSER_BUTTON, BROWSER_BUTTON, L1_MS);
 
-    static Target browserRow(float pitch, String text, String detail, int index) {
-        return new Target(Id.BROWSER_ITEM, 0f, pitch, BROWSER_ROW_W, BROWSER_ROW_H,
-                L1_MS, text, detail, index);
+    static float browserCardYaw(int column) {
+        return (column - (BROWSER_COLS - 1) * 0.5f) * BROWSER_CARD_YAW;
+    }
+
+    static Target browserCard(float yaw, float pitch, String text, String detail,
+                              int index, android.graphics.Bitmap thumb) {
+        Target t = new Target(Id.BROWSER_ITEM, yaw, pitch, BROWSER_CARD_W,
+                BROWSER_CARD_H, L1_MS, text, detail, index);
+        t.thumb = thumb;
+        return t;
     }
 
     static Target browserMode(String text) {
-        return new Target(Id.BROWSER_MODE, 15.5f, BROWSER_FOOTER2_PITCH, 19f, 6f,
-                L1_MS, text, null, -1);
+        return new Target(Id.BROWSER_MODE, 9f, BROWSER_FOOTER_PITCH,
+                BROWSER_BUTTON, BROWSER_BUTTON, L1_MS, text, null, -1);
     }
 
     static boolean inBrowserPanel(float yaw, float pitch) {

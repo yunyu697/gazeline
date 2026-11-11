@@ -5,32 +5,39 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.media.MediaDataSource;
 import android.net.Uri;
-import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.view.DisplayCutout;
 import android.view.Surface;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.Toast;
+
+import com.google.vr.sdk.base.GvrView;
+import com.google.vr.sdk.base.GvrViewerParams;
 
 import java.io.File;
 
 /**
  * Fullscreen stereo playback with the gaze layer. Orientation is
  * world←camera = recenterCorrection * sensorBasis * roll/drag; the gaze
- * controller anchors its HUD to the view direction captured on open, wake and
- * recenter, so looking at a control is a head movement rather than a reticle
- * chase. On the emulator (no sensor) drag simulates head movement.
+ * controller anchors its HUD to the video's centre — world (0, 0) after the
+ * recenter correction — so the bar, the menu and the file browser keep one
+ * fixed place in the picture instead of following the head. On the emulator
+ * (no sensor) drag simulates head movement.
  */
 public class PlayerActivity extends Activity
         implements HudView.Listener, GazeController.Listener,
@@ -47,6 +54,7 @@ public class PlayerActivity extends Activity
     private static final int OVERLAY_MENU = 1;
     private static final int OVERLAY_CONFIRM = 2;
     private static final int OVERLAY_BROWSER = 3;
+    private static final int OVERLAY_PROJ = 4;
 
     private static final long HISTORY_EVERY_MS = 5000L;
 
@@ -58,8 +66,8 @@ public class PlayerActivity extends Activity
     /** Grace window after the gaze trigger: turn back to a comfortable pose. */
     private static final long RECENTER_GRACE_MS = 3500;
 
-    private GLSurfaceView glView;
-    private StereoRenderer renderer;
+    private GvrView gvrView;
+    private GvrRenderer renderer;
     private HudView hud;
     private SensorManager sensors;
     private Sensor rotationSensor;
@@ -68,13 +76,25 @@ public class PlayerActivity extends Activity
     private GazeController menuGaze;
 
     private final HudView.Frame frame = new HudView.Frame();
+    private Bitmap hudBitmap;
+    private long renderedHudSig = -1;
+    private long lastTriggerMs;
 
-    private boolean panorama;
+    private ProjectionMode mode = ProjectionMode.FLAT_MONO;
+    /** The user picked a projection in the menu; detection must not undo it. */
+    private boolean modeUserSet;
+    /** One-time hint that the top/bottom edges bring the controls back. */
+    private long wakeHintUntil;
+    private boolean wakeHintShown;
     private boolean sensorWanted;
     private boolean sensorActive;
     private String dataSource;
     private String videoName = "?";
     private String videoFormat = "正在打开…";
+    private int videoWidth;
+    private int videoHeight;
+    private String videoMime = "?";
+    private boolean videoSoft;
 
     private final float[] sensorMatrix = new float[16];
     private final float[] remapped = new float[16];
@@ -84,11 +104,16 @@ public class PlayerActivity extends Activity
     private final float[] headRot = new float[9];
     private final float[] mulTmp = new float[9];
 
-    /** sin 45°: an up/down swap needs the phone rolled 45° past vertical. */
-    private static final float UP_FLIP_SIN = 0.70710678f;
+    /**
+     * The 180° choice is the screen's own rotation plus a user toggle, and it
+     * is frozen for the session: guessing it from head roll is what used to
+     * spin the picture while watching.
+     */
+    private boolean flipImage;
 
-    // Screen rotation the camera currently uses; it lags the window rotation so
-    // that a small tilt near the boundary cannot flip the whole view.
+    // Screen rotation the camera currently uses. Chosen from the sensors after
+    // the first frame: the system's 90/270 guess churns as soon as the phone is
+    // near a flat hold, and following it only swung the scene about.
     private int camRotation = -1;
 
     // drag / look offsets (no-sensor emulation and small trim)
@@ -138,7 +163,31 @@ public class PlayerActivity extends Activity
     private static final String DISPLAY_PREFS = "gazeline_display";
 
     private Sensor lightSensor;
+    private Sensor accelSensor;
     private int brightLevel = 4;
+
+    // Double-tap on the phone's back: an accelerometer spike pair. The video
+    // and the HUD keep moving the phone, so only a sharp pair counts.
+    private final float[] gravity = new float[3];
+    private boolean gravityReady;
+    private boolean accelWasHigh;
+    private long lastTapMs;
+    private long tapCooldownUntil;
+    private static final float TAP_PEAK = 3.2f;
+    private static final float TAP_REST = 1.2f;
+    private static final float TAP_GRAVITY_ALPHA = 0.22f;
+    private static final long TAP_GAP_MIN_MS = 60;
+    private static final long TAP_GAP_MAX_MS = 450;
+    private static final long TAP_COOLDOWN_MS = 1200;
+
+    // Timeline drag: gaze grabs the bar, head yaw scrubs while the gaze stays
+    // on it. Independent of the gaze focus, which a fast turn would cancel.
+    private boolean scrubbing;
+    private boolean scrubResume;
+    private float scrubBaseProgress;
+    private float scrubBaseRelYaw;
+    private long scrubTargetMs;
+    private long scrubSeekMs;
     private boolean autoBright;
     private int wakeLevel = 1;
     private int subStyle;
@@ -173,11 +222,14 @@ public class PlayerActivity extends Activity
     private int browserGen;
     private final java.util.List<HudSpec.Target> browserTargets = new java.util.ArrayList<>();
     private final java.util.List<BrowserRow> browserRows = new java.util.ArrayList<>();
+    private final java.util.Set<String> thumbPending = new java.util.HashSet<>();
 
     static final class BrowserRow {
         String title = "";
         String detail = "";
         String path = "";
+        /** Playable URL for a video row; doubles as the poster cache key. */
+        String source = "";
         int kind;
     }
 
@@ -188,6 +240,21 @@ public class PlayerActivity extends Activity
     private float maskAlpha;
     private float flashAlpha;
     private long flashStart;
+    private long settleSince;
+
+    /**
+     * The launch pose (phone in hand, on a table) must not define the video
+     * centre: it is not where the head will be. The reference is established
+     * once the device settles in a wearing pose instead. {@code interacted}
+     * means the user already acted, so silently moving the view would be rude.
+     */
+    private boolean viewAligned;
+    private boolean interacted;
+    private long steadySince;
+    private int alignCount;
+    private long lastAlignMs;
+    private float alignYawRef;
+    private float alignPitchRef;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
 
@@ -210,6 +277,14 @@ public class PlayerActivity extends Activity
                         | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                         | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        if (Build.VERSION.SDK_INT >= 28) {
+            // Let the picture and the black surround reach the camera cutout;
+            // the HUD layer pulls its own content inside the safe box instead.
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(lp);
+        }
         displayMode = DisplayModes.request(this);
 
         dataSource = getIntent().getStringExtra(EXTRA_PATH);
@@ -224,11 +299,31 @@ public class PlayerActivity extends Activity
             dataSource = "";
             playing = false;
         }
-        panorama = "360".equals(getIntent().getStringExtra(EXTRA_MODE));
         sensorWanted = getIntent().getBooleanExtra(EXTRA_SENSOR, true);
         startAtMs = Math.max(0L, getIntent().getLongExtra(EXTRA_POSITION, 0L));
         smbMode = !browserOnly && SmbSettings.isSmb(dataSource);
         videoName = browserOnly ? "片库" : displayName(dataSource);
+        // Projection: an explicit extra wins, otherwise the filename decides and
+        // the track shape refines it once the decoder reports the size. The
+        // library's global toggle is only the fallback for unrecognised names.
+        ProjectionMode requested = ProjectionMode.parse(getIntent().getStringExtra(EXTRA_MODE));
+        ProjectionMode fallback = ProjectionMode.parse(SmbSettings.load(this).projection);
+        if (fallback == null) {
+            fallback = new ProjectionMode(ProjectionMode.EQ360, ProjectionMode.MONO);
+        }
+        mode = requested != null ? requested
+                : ProjectionMode.detect(videoName, 0, 0, fallback);
+        modeUserSet = requested != null;
+        if (!modeUserSet) {
+            // A type picked in the player last time outranks name detection;
+            // the picker's 自动 row clears it again.
+            ProjectionMode saved = ProjectionMode.parse(getSharedPreferences(
+                    DISPLAY_PREFS, MODE_PRIVATE).getString("proj", null));
+            if (saved != null) {
+                mode = saved;
+                modeUserSet = true;
+            }
+        }
         String subtitle = getIntent().getStringExtra(EXTRA_SUBTITLE);
         if (!browserOnly && (subtitle == null || subtitle.length() == 0)) {
             subtitle = SubtitleTrack.findSidecar(dataSource);
@@ -241,6 +336,7 @@ public class PlayerActivity extends Activity
         if (sensors != null) {
             rotationSensor = sensors.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
             lightSensor = sensors.getDefaultSensor(Sensor.TYPE_LIGHT);
+            accelSensor = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         }
         sensorActive = sensorWanted && rotationSensor != null;
 
@@ -250,41 +346,84 @@ public class PlayerActivity extends Activity
         gaze = new GazeController(this);
         menuGaze = new GazeController(this);
         menuGaze.setLayer(HudSpec.MENU_ROWS_P1, false);
+        gaze.setTriggerMode(true);
+        menuGaze.setTriggerMode(true);
         loadDisplayPrefs();
 
         if (!browserOnly) {
-            glView = new GLSurfaceView(this);
-            glView.setEGLContextClientVersion(2);
+            gvrView = new GvrView(this);
             renderer = smbMode
-                    ? new StereoRenderer(this, (MediaDataSource) null, panorama, this, this)
-                    : new StereoRenderer(this, dataSource, panorama, this, this);
+                    ? new GvrRenderer(this, (MediaDataSource) null, mode, this, this)
+                    : new GvrRenderer(this, dataSource, mode, this, this);
             renderer.setCalib(CalibParams.load(this));
-            glView.setRenderer(renderer);
-            glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
+            gvrView.setTransitionViewEnabled(false);
+            // No paired viewer means the SDK would sit in its setup overlay;
+            // the built-in Cardboard profile gets straight stereo playback.
+            gvrView.updateGvrViewerParams(GvrViewerParams.cardboardV1ViewerParams());
+            gvrView.setDistortionCorrectionEnabled(!isEmulator());
+            gvrView.setRenderer(renderer);
+            // A screen tap is the trigger on a phone without a viewer button;
+            // GvrView only routes taps to the listener when this is enabled.
+            gvrView.enableCardboardTriggerEmulation();
+            gvrView.setOnCardboardTriggerListener(new Runnable() {
+                @Override
+                public void run() {
+                    onTrigger();
+                }
+            });
+            // Belt and braces: a plain tap also counts. The SDK's emulation is
+            // enough on paper but costs nothing to keep, and the debounce below
+            // folds the two paths into one action.
+            gvrView.setOnTouchListener(new View.OnTouchListener() {
+                private float downX;
+                private float downY;
+
+                @Override
+                public boolean onTouch(View v, android.view.MotionEvent e) {
+                    if (e.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
+                        downX = e.getX();
+                        downY = e.getY();
+                    } else if (e.getActionMasked() == android.view.MotionEvent.ACTION_UP) {
+                        float dx = e.getX() - downX;
+                        float dy = e.getY() - downY;
+                        if (dx * dx + dy * dy < 48f * 48f) {
+                            onTrigger();
+                        }
+                    }
+                    return false;
+                }
+            });
         }
 
         hud = new HudView(this);
         hud.setListener(this);
+        hud.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            @Override
+            public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
+                applyCutoutInsets(insets);
+                return insets;
+            }
+        });
 
         FrameLayout root = new FrameLayout(this);
-        if (glView != null) {
-            root.addView(glView, new FrameLayout.LayoutParams(
+        if (gvrView != null) {
+            root.addView(gvrView, new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         } else {
             root.setBackgroundColor(0xFF05070A);
+            // No stereo pipeline to draw into: the browser page keeps the old
+            // flat, two-eye layout on the phone screen.
+            root.addView(hud, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         }
-        root.addView(hud, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
 
         sessionStartMs = SystemClock.elapsedRealtime();
         lastActivityMs = sessionStartMs;
         showStatus(browserOnly ? "片库 · 凝视选择" : "显示 " + displayMode);
         updateRotation();
-        sensorPrimed = !sensorActive;
-        if (!sensorActive) {
-            gaze.setAnchor(viewYaw, viewPitch);
-        }
+        sensorPrimed = true;
+        gaze.setAnchor(0f, 0f);
         if (smbMode) {
             videoFormat = "SMB · 正在连接…";
             beginSmbOpen();
@@ -294,8 +433,8 @@ public class PlayerActivity extends Activity
     @Override
     protected void onResume() {
         super.onResume();
-        if (glView != null) {
-            glView.onResume();
+        if (gvrView != null) {
+            gvrView.onResume();
         }
         if (renderer != null) {
             renderer.setFreeze(false);
@@ -306,8 +445,11 @@ public class PlayerActivity extends Activity
                 renderer.pausePlayback();
             }
         }
-        if (sensorActive) {
-            sensors.registerListener(this, rotationSensor, SensorManager.SENSOR_DELAY_GAME);
+        if (accelSensor != null && !browserOnly) {
+            sensors.registerListener(this, accelSensor, SensorManager.SENSOR_DELAY_GAME);
+        }
+        if (hud != null) {
+            hud.requestApplyInsets();
         }
         registerLight();
         autoTarget = -1f;
@@ -321,10 +463,8 @@ public class PlayerActivity extends Activity
         overlayHintUntil = 0;
         lastTickMs = 0;
         lastActivityMs = SystemClock.elapsedRealtime();
-        sensorPrimed = !sensorActive;
-        if (!sensorActive) {
-            gaze.setAnchor(viewYaw, viewPitch);
-        }
+        sensorPrimed = true;
+        gaze.setAnchor(0f, 0f);
         resumed = true;
         if (smbSource != null && !smbApplied && renderer != null) {
             smbApplied = true;
@@ -349,8 +489,8 @@ public class PlayerActivity extends Activity
             renderer.setFreeze(false);
             renderer.stopDecoder();
         }
-        if (glView != null) {
-            glView.onPause();
+        if (gvrView != null) {
+            gvrView.onPause();
         }
     }
 
@@ -360,6 +500,12 @@ public class PlayerActivity extends Activity
         if (smbSource != null) {
             smbSource.close();
             smbSource = null;
+        }
+        if (gvrView != null) {
+            gvrView.shutdown();
+        }
+        if (renderer != null) {
+            renderer.release();
         }
         if (feedback != null) {
             feedback.release();
@@ -380,7 +526,7 @@ public class PlayerActivity extends Activity
             return;
         }
         PlayHistory.record(this, dataSource, stripExtension(videoName),
-                panorama ? "360" : "sbs", position, d.durationMs());
+                mode.key(), position, d.durationMs());
         lastHistoryMs = SystemClock.elapsedRealtime();
     }
 
@@ -459,8 +605,16 @@ public class PlayerActivity extends Activity
     @Override
     public void onBackPressed() {
         long now = SystemClock.elapsedRealtime();
+        if (scrubbing) {
+            endScrub(now, true);
+            return;
+        }
         if (overlay == OVERLAY_MENU) {
             closeOverlay("菜单已关闭");
+            return;
+        }
+        if (overlay == OVERLAY_PROJ) {
+            closeOverlay("画面类型已关闭");
             return;
         }
         if (overlay == OVERLAY_CONFIRM) {
@@ -513,7 +667,9 @@ public class PlayerActivity extends Activity
         prevViewPitch = viewPitch;
         prevTickMs = now;
 
+        maybeAutoAlign(now);
         updateRecenter(now);
+        applyPackEvidence();
 
         if (!browserOnly && now - lastHistoryMs >= HISTORY_EVERY_MS) {
             recordProgress();
@@ -533,6 +689,7 @@ public class PlayerActivity extends Activity
             gaze.update(now, viewYaw, viewPitch, speedForGaze,
                     controlsShown, recPhase == REC_IDLE);
         }
+        updateScrub(now);
 
         GazeController.Readout g = gaze.readout();
         GazeController.Readout mg = menuGaze.readout();
@@ -544,15 +701,52 @@ public class PlayerActivity extends Activity
             statusText = "";
         }
 
-        float wakeAlpha = playing ? Math.max(0f, 1f - hudAlpha) : 0f;
+        // The settings panel owns the screen: while it is up no HUD layer may
+        // appear, so the wake bar and its lesson text stay away from it.
+        float wakeAlpha = playing && overlay == OVERLAY_NONE
+                ? Math.max(0f, 1f - hudAlpha) : 0f;
+        if (!wakeHintShown && playing && wakeAlpha > 0.8f) {
+            // One short lesson right after the controls first tuck away; after
+            // that the picture stays clean and the edges only react on approach.
+            wakeHintShown = true;
+            wakeHintUntil = now + 4500L;
+        }
 
         refreshBrightness(now);
 
         buildFrame(now, hudAlpha, wakeAlpha);
         hud.setFrame(frame, now);
+        if (renderer != null) {
+            renderHud();
+        }
+    }
+
+    /**
+     * Rasterises the HUD for the VR renderer, on the UI thread and only when
+     * the frame token changes. {@link GvrView} cannot host a child View: it
+     * would be neither duplicated per eye nor bent with the lenses, so the
+     * layer is handed over as a texture instead.
+     */
+    private void renderHud() {
+        long sig = hud.signature();
+        if (hudBitmap != null && sig == renderedHudSig) {
+            return;
+        }
+        if (hudBitmap == null) {
+            hudBitmap = Bitmap.createBitmap(1024, 1024, Bitmap.Config.ARGB_8888);
+        }
+        renderedHudSig = sig;
+        synchronized (renderer.hudLock) {
+            hud.renderEye(hudBitmap);
+            renderer.invalidateHud(hudBitmap);
+        }
     }
 
     private float computeHudAlpha(long now) {
+        if (scrubbing) {
+            // The bar is the feedback for the drag: keep it fully lit.
+            return 1f;
+        }
         if (!playing) {
             return 0.4f;
         }
@@ -601,18 +795,21 @@ public class PlayerActivity extends Activity
         } else {
             boolean inside = overlay == OVERLAY_MENU
                     ? HudSpec.inMenuPanel(mg.relYaw, mg.relPitch)
+                    : overlay == OVERLAY_PROJ
+                    ? HudSpec.inProjPanel(mg.relYaw, mg.relPitch)
                     : HudSpec.inConfirmPanel(mg.relYaw, mg.relPitch);
             if (inside) {
                 menuLeaveSince = 0;
             } else if (menuLeaveSince == 0) {
                 menuLeaveSince = now;
             } else if (now - menuLeaveSince >= HudSpec.MENU_LEAVE_CLOSE_MS) {
-                closeOverlay(overlay == OVERLAY_MENU ? "菜单已关闭" : "已取消退出");
+                closeOverlay(overlay == OVERLAY_MENU ? "菜单已关闭"
+                        : overlay == OVERLAY_PROJ ? "画面类型已关闭" : "已取消退出");
                 return;
             }
         }
-        if (overlay == OVERLAY_MENU && now - menuOpenedAt >= HudSpec.MENU_AUTO_CLOSE_MS) {
-            closeOverlay("菜单已关闭");
+        if (overlay != OVERLAY_CONFIRM && now - menuOpenedAt >= HudSpec.MENU_AUTO_CLOSE_MS) {
+            closeOverlay(overlay == OVERLAY_MENU ? "菜单已关闭" : "画面类型已关闭");
         }
     }
 
@@ -627,7 +824,7 @@ public class PlayerActivity extends Activity
         menuLeaveSince = 0;
         menuPage = 0;
         menuGaze.setLayer(menuRows(), false);
-        menuGaze.setAnchor(viewYaw, viewPitch);
+        menuGaze.setAnchor(0f, 0f);
         menuGaze.onHudOpened(now);
         menuGaze.protect(now, HudSpec.MENU_PROTECT_MS);
         feedback.menuOpen();
@@ -640,14 +837,94 @@ public class PlayerActivity extends Activity
      * so neither page has to squeeze extra rows into the panel.
      */
     private HudSpec.Target[] menuRows() {
+        if (overlay == OVERLAY_PROJ) {
+            return HudSpec.PROJ_ROWS;
+        }
         return menuPage == 0 ? HudSpec.MENU_ROWS_P1 : HudSpec.MENU_ROWS_P2;
+    }
+
+    /**
+     * Compact picker straight from the HUD: the automatic choice plus the six
+     * combinations people actually use, so no file has to be cycled through the
+     * five families one row at a time.
+     */
+    private void openProjPanel() {
+        long now = SystemClock.elapsedRealtime();
+        overlay = OVERLAY_PROJ;
+        overlayStart = now;
+        overlayAlpha = 0f;
+        overlayHint = "";
+        overlayHintUntil = 0;
+        menuOpenedAt = now;
+        menuLeaveSince = 0;
+        menuGaze.setLayer(HudSpec.PROJ_ROWS, false);
+        menuGaze.setAnchor(0f, 0f);
+        menuGaze.onHudOpened(now);
+        menuGaze.protect(now, HudSpec.MENU_PROTECT_MS);
+        feedback.menuOpen();
+        lastActivityMs = now;
+    }
+
+    private static final ProjectionMode[] PROJ_PRESETS = {
+            null,
+            new ProjectionMode(ProjectionMode.EQ360, ProjectionMode.MONO),
+            new ProjectionMode(ProjectionMode.EQ360, ProjectionMode.SBS),
+            new ProjectionMode(ProjectionMode.EQ180, ProjectionMode.SBS),
+            new ProjectionMode(ProjectionMode.EQ180, ProjectionMode.TB),
+            ProjectionMode.FLAT_MONO,
+            new ProjectionMode(ProjectionMode.FLAT, ProjectionMode.SBS),
+    };
+
+    /**
+     * Picker row → mode. 自动 drops the stored choice and re-detects, the rest
+     * apply at once and are remembered for the next file; a user pick also
+     * stops the packing evidence from overriding it mid-playback.
+     */
+    private void applyProjectionOption(HudSpec.Target target) {
+        int option = target.index;
+        if (option <= 0) {
+            modeUserSet = false;
+            getSharedPreferences(DISPLAY_PREFS, MODE_PRIVATE).edit().remove("proj").apply();
+            ProjectionMode detected = ProjectionMode.detect(videoName, videoWidth, videoHeight, null);
+            if (renderer != null) {
+                renderer.setMode(detected);
+            }
+            mode = detected;
+            videoFormat = formatLine();
+            String hint = "自动识别 · " + detected.label();
+            setOverlayHint(hint);
+            showStatus("画面类型 " + hint);
+            return;
+        }
+        if (option >= PROJ_PRESETS.length || PROJ_PRESETS[option] == null) {
+            return;
+        }
+        ProjectionMode picked = PROJ_PRESETS[option];
+        getSharedPreferences(DISPLAY_PREFS, MODE_PRIVATE).edit()
+                .putString("proj", picked.key()).apply();
+        applyProjection(picked, true);
+        setOverlayHint("画面类型 " + picked.label());
+    }
+
+    /** Which picker row is in force, or -1 when the mode matches no preset. */
+    private int currentProjOption() {
+        if (!modeUserSet) {
+            return 0;
+        }
+        for (int i = 1; i < PROJ_PRESETS.length; i++) {
+            ProjectionMode p = PROJ_PRESETS[i];
+            if (p != null && p.proj == mode.proj && p.pack == mode.pack) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private void setMenuPage(int page) {
         long now = SystemClock.elapsedRealtime();
         menuPage = page == 0 ? 0 : 1;
         menuGaze.setLayer(menuRows(), false);
-        menuGaze.setAnchor(viewYaw, viewPitch);
+        menuGaze.setAnchor(0f, 0f);
         menuGaze.onHudOpened(now);
         menuGaze.protect(now, HudSpec.MENU_PROTECT_MS);
         overlayHint = menuPage == 0 ? "已回到第一页" : "第二页：音量 / 服务器 / 字幕样式";
@@ -665,7 +942,7 @@ public class PlayerActivity extends Activity
         overlayHintUntil = 0;
         menuLeaveSince = 0;
         menuGaze.setLayer(HudSpec.CONFIRM_TARGETS, false);
-        menuGaze.setAnchor(viewYaw, viewPitch);
+        menuGaze.setAnchor(0f, 0f);
         menuGaze.onHudOpened(now);
         menuGaze.protect(now, HudSpec.CONFIRM_PROTECT_MS);
         feedback.ready();
@@ -680,7 +957,7 @@ public class PlayerActivity extends Activity
         overlayHintUntil = 0;
         menuLeaveSince = 0;
         feedback.menuClose();
-        gaze.setAnchor(viewYaw, viewPitch);
+        gaze.setAnchor(0f, 0f);
         gaze.onHudOpened(now);
         lastActivityMs = now;
         if (status != null && status.length() > 0) {
@@ -696,7 +973,7 @@ public class PlayerActivity extends Activity
         long position = d == null ? 0L : d.positionMs();
         Intent out = new Intent();
         out.putExtra(EXTRA_PATH, dataSource);
-        out.putExtra(EXTRA_MODE, panorama ? "360" : "sbs");
+        out.putExtra(EXTRA_MODE, mode.key());
         out.putExtra(EXTRA_POSITION, position);
         setResult(RESULT_OK, out);
         finish();
@@ -742,8 +1019,9 @@ public class PlayerActivity extends Activity
             frame.audioText = audio.summary() + (audio.isMuted() ? " · 倍速静音" : " · 有声");
         }
         VideoDecoder d = renderer == null ? null : renderer.decoder();
-        frame.positionMs = d == null ? 0 : d.positionMs();
+        frame.positionMs = scrubbing ? scrubTargetMs : (d == null ? 0 : d.positionMs());
         frame.durationMs = d == null ? 0 : d.durationMs();
+        frame.scrubbing = scrubbing;
         frame.browserTargets = browserTargets.toArray(new HudSpec.Target[0]);
         frame.browserPath = browserPathText();
         frame.browserHint = browserHint;
@@ -753,8 +1031,10 @@ public class PlayerActivity extends Activity
         frame.browserGen = browserGen;
         frame.gaze = gaze.readout();
         frame.hudAlpha = hudAlpha;
+        frame.wakeHintUntil = wakeHintUntil;
         frame.wakeAlpha = wakeAlpha;
         frame.wakeProgress = frame.gaze == null ? 0f : frame.gaze.wakeProgress;
+        frame.wakeUp = frame.gaze != null && frame.gaze.wakeUp;
         frame.maskAlpha = maskAlpha;
         frame.flashAlpha = flashAlpha;
         frame.recenterCountdown = recPhase == REC_COUNTDOWN ? recCountdown : 0f;
@@ -773,6 +1053,9 @@ public class PlayerActivity extends Activity
         frame.volumeText = volumeText();
         frame.serverText = serverText();
         frame.subStyleText = SUB_STYLE_LABELS[subStyle];
+        frame.projText = mode.projLabel();
+        frame.packText = mode.packLabel();
+        frame.projOption = currentProjOption();
         frame.subtitleScale = SUB_STYLE_SCALE[subStyle];
         frame.subtitleOutline = subStyle != 2;
         frame.defaultFocusHint = overlay != OVERLAY_BROWSER
@@ -802,12 +1085,24 @@ public class PlayerActivity extends Activity
     }
 
     @Override
-    public void onWake() {
-        long now = SystemClock.elapsedRealtime();
+    public void onWake(boolean up) {
+        showHud();
+    }
+
+    /**
+     * Brings the controls back at the picture's centre. The glance and the
+     * double-tap both land here; the layer is anchored to the video centre (the
+     * recenter direction), not to wherever the head happens to point, so the
+     * bar and the panels never drift or re-seat themselves while watching.
+     */
+    private void showHud() {
+        final long now = SystemClock.elapsedRealtime();
         feedback.wake();
         lastActivityMs = now;
         wakeFadeStart = now;
-        gaze.setAnchor(viewYaw, viewPitch);
+        interacted = true;
+        viewAligned = true;
+        gaze.setAnchor(0f, 0f);
         gaze.onHudOpened(now);
     }
 
@@ -820,6 +1115,7 @@ public class PlayerActivity extends Activity
         autoBright = p.getBoolean("auto", false);
         wakeLevel = p.getInt("wake", 1);
         subStyle = p.getInt("sub_style", 0);
+        flipImage = p.getBoolean("flip", false);
         if (brightLevel < 0 || brightLevel >= BRIGHT_LEVELS.length) {
             brightLevel = 4;
         }
@@ -909,7 +1205,7 @@ public class PlayerActivity extends Activity
         gaze.setWakePitch(WAKE_PITCHES[wakeLevel]);
         saveDisplayPrefs();
         showStatus("唤回灵敏度 " + WAKE_LABELS[wakeLevel]
-                + " · 低头 " + (int) WAKE_PITCHES[wakeLevel] + "°");
+                + " · 下看或上看 " + (int) WAKE_PITCHES[wakeLevel] + "°");
     }
 
     private String brightnessText() {
@@ -995,10 +1291,87 @@ public class PlayerActivity extends Activity
         showStatus("字幕样式 " + SUB_STYLE_LABELS[subStyle]);
     }
 
+    /**
+     * The projection cannot always be read from the file, so the menu walks the
+     * five families and the packing walks mono/左右/上下. The pair is applied
+     * on the next frame and stays until playback ends.
+     */
+    private void cycleProjection() {
+        int next = (mode.proj + 1) % ProjectionMode.PROJ_COUNT;
+        applyProjection(ProjectionMode.of(next, mode.pack), true);
+    }
+
+    private void cyclePacking() {
+        int next = (mode.pack + 1) % ProjectionMode.PACK_COUNT;
+        applyProjection(ProjectionMode.of(mode.proj, next), true);
+    }
+
+    private void applyProjection(ProjectionMode m, boolean byUser) {
+        if (m.proj == mode.proj && m.pack == mode.pack) {
+            if (byUser) {
+                modeUserSet = true;
+            }
+            return;
+        }
+        mode = m;
+        if (byUser) {
+            modeUserSet = true;
+        }
+        if (renderer != null) {
+            renderer.setMode(m);
+        }
+        if (byUser) {
+            String text = "投影 " + m.label();
+            showStatus(text);
+            if (overlay == OVERLAY_MENU || overlay == OVERLAY_PROJ) {
+                setOverlayHint(text);
+            }
+        } else {
+            showStatus("已识别 " + m.label());
+        }
+        videoFormat = formatLine();
+    }
+
+    /**
+     * Adopt the packing the first frames proved. The shape alone cannot tell a
+     * 2:1 mono sphere from a 2:1 pair of 1:1 eyes, and guessing wrong put the
+     * seam of a side-by-side film dead ahead; the pixels decide instead, once
+     * per video, unless the name or the user already spoke.
+     */
+    private void applyPackEvidence() {
+        if (renderer == null || modeUserSet || ProjectionMode.nameHasPack(videoName)) {
+            return;
+        }
+        int ev = renderer.packEvidence();
+        if (ev < 0 || ev == mode.pack) {
+            return;
+        }
+        float ar = videoHeight > 0 ? videoWidth / (float) videoHeight : 0f;
+        ProjectionMode next = ProjectionMode.withPack(mode, ev, ar);
+        if (next.pack != mode.pack) {
+            applyProjection(next, false);
+        }
+    }
+
+    private String formatLine() {
+        String pack = mode.pack == ProjectionMode.MONO ? "" : " " + mode.packLabel();
+        String text = mode.projLabel() + pack + " · " + videoWidth + "×" + videoHeight
+                + " · " + videoMime;
+        if (videoSoft) {
+            text += " · 软解";
+        }
+        return text;
+    }
+
     @Override
     public void onGazeConfirm(HudSpec.Target target) {
+        if (scrubbing && target.id != HudSpec.Id.TIMELINE) {
+            return;
+        }
         feedback.confirm();
         lastActivityMs = SystemClock.elapsedRealtime();
+        interacted = true;
+        viewAligned = true;
         switch (target.id) {
             case PLAY:
                 togglePlay();
@@ -1015,8 +1388,20 @@ public class PlayerActivity extends Activity
             case RECENTER:
                 startRecenter();
                 break;
+            case TIMELINE:
+                beginScrub();
+                break;
             case MENU:
                 openMenu();
+                break;
+            case FILES:
+                openBrowser();
+                break;
+            case PROJ:
+                openProjPanel();
+                break;
+            case PROJ_OPTION:
+                applyProjectionOption(target);
                 break;
             case MENU_SUBTITLE:
                 toggleSubtitle(true);
@@ -1043,7 +1428,11 @@ public class PlayerActivity extends Activity
                 setMenuPage(1);
                 break;
             case MENU_BACK:
-                setMenuPage(0);
+                if (menuPage == 0) {
+                    closeOverlay("菜单已关闭");
+                } else {
+                    setMenuPage(0);
+                }
                 break;
             case MENU_VOLUME:
                 cycleVolume();
@@ -1053,6 +1442,12 @@ public class PlayerActivity extends Activity
                 break;
             case MENU_SUB_STYLE:
                 cycleSubtitleStyle();
+                break;
+            case MENU_PROJ:
+                cycleProjection();
+                break;
+            case MENU_PACK:
+                cyclePacking();
                 break;
             case BROWSER_ITEM:
             case BROWSER_PREV:
@@ -1199,6 +1594,84 @@ public class PlayerActivity extends Activity
         lastActivityMs = SystemClock.elapsedRealtime();
     }
 
+    /**
+     * Gaze held on the bar: pause, then map head yaw onto the film. The grab
+     * point is kept, so the picture does not jump when the drag starts, and the
+     * progress bar itself shows the target time while the decoder is paused.
+     */
+    private void beginScrub() {
+        if (scrubbing || renderer == null) {
+            return;
+        }
+        VideoDecoder d = renderer.decoder();
+        if (d == null || d.durationMs() <= 0) {
+            showStatus("进度不可用");
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        scrubbing = true;
+        scrubResume = playing;
+        if (playing) {
+            playing = false;
+            renderer.pausePlayback();
+        }
+        GazeController.Readout r = gaze.readout();
+        scrubBaseRelYaw = r.relYaw;
+        scrubTargetMs = d.positionMs();
+        scrubBaseProgress = Math.max(0f,
+                Math.min(1f, scrubTargetMs / (float) d.durationMs()));
+        scrubSeekMs = 0;
+        interacted = true;
+        viewAligned = true;
+        lastActivityMs = now;
+        showStatus("拖动进度：左右转头 · 视线离开进度条结束");
+    }
+
+    private void updateScrub(long now) {
+        if (!scrubbing) {
+            return;
+        }
+        VideoDecoder d = renderer == null ? null : renderer.decoder();
+        if (overlay != OVERLAY_NONE || d == null || d.durationMs() <= 0) {
+            endScrub(now, d != null);
+            return;
+        }
+        GazeController.Readout r = gaze.readout();
+        float dyaw = GazeController.wrap(r.relYaw - scrubBaseRelYaw);
+        float progress = scrubBaseProgress + dyaw / HudSpec.BAR_WIDTH;
+        progress = Math.max(0f, Math.min(1f, progress));
+        scrubTargetMs = (long) (progress * d.durationMs());
+        if (Math.abs(r.relPitch - HudSpec.BAR_PITCH) > 7f || Math.abs(r.relYaw) > 40f) {
+            endScrub(now, true);
+            return;
+        }
+        if (scrubSeekMs == 0 || now - scrubSeekMs >= 120) {
+            scrubSeekMs = now;
+            renderer.seekTo(scrubTargetMs);
+        }
+        // A drag must not be interrupted by the idle fade.
+        lastActivityMs = now;
+    }
+
+    private void endScrub(long now, boolean seek) {
+        if (!scrubbing) {
+            return;
+        }
+        scrubbing = false;
+        if (seek && renderer != null) {
+            renderer.seekTo(scrubTargetMs);
+        }
+        if (scrubResume) {
+            playing = true;
+            if (renderer != null) {
+                renderer.resumePlayback();
+            }
+        }
+        scrubResume = false;
+        lastActivityMs = now;
+        showStatus("进度 " + timeText(scrubTargetMs));
+    }
+
     private void seekBy(long deltaMs, String label) {
         VideoDecoder d = renderer.decoder();
         if (d == null) {
@@ -1224,6 +1697,75 @@ public class PlayerActivity extends Activity
     // ------------------------------------------------------------- recenter
 
     /**
+     * Establishes the content reference once the device is actually being worn.
+     *
+     * The launch pose cannot be used as "forward": the phone is in the hand or
+     * on a table when playback starts, and baking that pitch left the video
+     * pointing at the zenith (and made the down-glance wake unreachable). Here
+     * the reference is re-taken only after the phone has been held upright and
+     * still for a moment, and it is allowed to happen again while the holder
+     * moves the phone into the headset (pitch changes by tens of degrees), so
+     * the last reference is the wearing pose. It stops for good on the first
+     * real action.
+     */
+    private void maybeAutoAlign(long now) {
+        if (renderer == null || !sensorPrimed || interacted || viewAligned) {
+            steadySince = 0;
+            return;
+        }
+        if (recPhase != REC_IDLE || overlay != OVERLAY_NONE) {
+            steadySince = 0;
+            return;
+        }
+        if (now - sessionStartMs < 2000) {
+            steadySince = 0;
+            return;
+        }
+        if (alignCount >= 3) {
+            return;
+        }
+        if (alignCount > 0) {
+            if (now - lastAlignMs < 1500) {
+                steadySince = 0;
+                return;
+            }
+            // Only a real pose change justifies moving the view again; looking
+            // around (mostly yaw) must not keep re-centring it.
+            boolean moved = Math.abs(viewPitch - alignPitchRef) >= 18f
+                    || Math.abs(GazeController.wrap(viewYaw - alignYawRef)) >= 60f;
+            if (!moved) {
+                return;
+            }
+        }
+        // A phone on a table points at the ceiling or the floor; a worn headset
+        // is close to level. That is enough to tell "not being used yet" from
+        // "watching", so the launch pose never becomes the video's centre.
+        boolean upright = Math.abs(renderer.headPitchAbs()) <= 32f;
+        if (!upright || angularSpeed >= 20f) {
+            steadySince = 0;
+            return;
+        }
+        if (steadySince == 0) {
+            steadySince = now;
+            return;
+        }
+        if (now - steadySince < 800) {
+            return;
+        }
+        steadySince = 0;
+        alignCount++;
+        lastAlignMs = now;
+        applyRecenter();
+        gaze.setAnchor(0f, 0f);
+        lastActivityMs = now;
+        alignYawRef = viewYaw;
+        alignPitchRef = viewPitch;
+        if (alignCount == 1) {
+            showStatus("已对准视频中央");
+        }
+    }
+
+    /**
      * Gaze triggers the action; the user then gets a grace window to settle into
      * a comfortable pose. When it expires, whatever direction the head is
      * pointing at that moment becomes the new forward — no forced rotation.
@@ -1233,13 +1775,16 @@ public class PlayerActivity extends Activity
             return;
         }
         long now = SystemClock.elapsedRealtime();
+        interacted = true;
+        viewAligned = true;
+        settleSince = 0;
         recPhase = REC_COUNTDOWN;
         recPhaseStart = now;
         recCountdown = RECENTER_GRACE_MS / 1000f;
         maskAlpha = 0f;
         flashAlpha = 0f;
         lastActivityMs = now;
-        showStatus("请调整姿态 · 随后按当前朝向回中");
+        showStatus("回中：抬头看正前方，停稳即对准");
     }
 
     private void updateRecenter(long now) {
@@ -1247,7 +1792,23 @@ public class PlayerActivity extends Activity
             case REC_COUNTDOWN: {
                 float left = RECENTER_GRACE_MS - (now - recPhaseStart);
                 recCountdown = Math.max(0f, left / 1000f);
-                if (left <= 0f) {
+                // Commit as soon as the head is back near the panel's level and
+                // still, instead of always waiting out the grace window: aiming
+                // at the key means looking 25° down-left, and baking *that*
+                // direction as forward was what made 回中 feel like it did not
+                // return to the video centre.
+                GazeController.Readout r = gaze.readout();
+                boolean level = Math.abs(r.relPitch) <= 9f;
+                if (level && angularSpeed < HudSpec.SPEED_RESUME_DEG) {
+                    if (settleSince == 0) {
+                        settleSince = now;
+                    }
+                } else {
+                    settleSince = 0;
+                }
+                boolean settled = settleSince != 0 && now - settleSince >= 260;
+                if (left <= 0f || settled) {
+                    settleSince = 0;
                     recCountdown = 0f;
                     recPhase = REC_MASK_IN;
                     recPhaseStart = now;
@@ -1292,9 +1853,9 @@ public class PlayerActivity extends Activity
 
     /** Bakes the current head direction in as forward, behind the short mask. */
     private void applyRecenter() {
-        updateRotation();
-        worldYaw = GazeController.wrap(worldYaw - viewYaw);
-        worldPitch = clamp(worldPitch - viewPitch, -80f, 80f);
+        if (renderer != null) {
+            renderer.recenter();
+        }
         updateRotation();
     }
 
@@ -1304,7 +1865,7 @@ public class PlayerActivity extends Activity
         maskAlpha = 0f;
         flashAlpha = 0f;
         updateRotation();
-        gaze.setAnchor(viewYaw, viewPitch);
+        gaze.setAnchor(0f, 0f);
         gaze.onHudOpened(now);
         lastActivityMs = now;
         if (interrupted) {
@@ -1320,7 +1881,7 @@ public class PlayerActivity extends Activity
     private static final int BROW_KIND_VIDEO = 2;
     private static final int BROW_KIND_FAV = 3;
     private static final int BROW_KIND_SERVER = 4;
-    private static final int BROWSER_PAGE_SIZE = 5;
+    private static final int BROWSER_PAGE_SIZE = HudSpec.BROWSER_PAGE_SIZE;
 
     private void openBrowser() {
         SmbSettings settings = SmbSettings.load(this);
@@ -1339,7 +1900,7 @@ public class PlayerActivity extends Activity
         browserTargets.clear();
         browserHint = "";
         browserLoading = settings.isConfigured();
-        menuGaze.setAnchor(viewYaw, viewPitch);
+        menuGaze.setAnchor(0f, 0f);
         menuGaze.onHudOpened(now);
         menuGaze.protect(now, 500);
         feedback.menuOpen();
@@ -1452,9 +2013,10 @@ public class PlayerActivity extends Activity
             BrowserRow r = new BrowserRow();
             r.kind = BROW_KIND_VIDEO;
             r.path = e.path;
+            r.source = settings.url(e.path);
             r.title = e.name;
             String detail = sizeText(e.size);
-            PlayHistory.Entry h = PlayHistory.find(this, settings.url(e.path));
+            PlayHistory.Entry h = PlayHistory.find(this, r.source);
             if (h != null && h.resumable()) {
                 detail = (detail.length() == 0 ? "" : detail + " · ")
                         + "继续 " + timeText(h.positionMs);
@@ -1467,32 +2029,83 @@ public class PlayerActivity extends Activity
     private void rebuildBrowser() {
         browserTargets.clear();
         int size = browserRows.size();
-        browserPages = Math.max(1, (size + BROWSER_PAGE_SIZE - 1) / BROWSER_PAGE_SIZE);
+        int pageSize = BROWSER_PAGE_SIZE;
+        browserPages = Math.max(1, (size + pageSize - 1) / pageSize);
         if (browserPage >= browserPages) {
             browserPage = browserPages - 1;
         }
         if (browserPage < 0) {
             browserPage = 0;
         }
-        int start = browserPage * BROWSER_PAGE_SIZE;
-        for (int slot = 0; slot < BROWSER_PAGE_SIZE; slot++) {
+        int start = browserPage * pageSize;
+        for (int slot = 0; slot < pageSize; slot++) {
             int index = start + slot;
             if (index >= size) {
                 break;
             }
             BrowserRow r = browserRows.get(index);
-            browserTargets.add(HudSpec.browserRow(HudSpec.BROWSER_ROW_PITCH[slot],
-                    r.title, r.detail, index));
+            int col = slot % HudSpec.BROWSER_COLS;
+            int row = slot / HudSpec.BROWSER_COLS;
+            String key = r.kind == BROW_KIND_VIDEO ? r.source : null;
+            android.graphics.Bitmap thumb = key == null ? null : Thumbnails.peek(key);
+            browserTargets.add(HudSpec.browserCard(HudSpec.browserCardYaw(col),
+                    HudSpec.BROWSER_CARD_PITCH[row], r.title, r.detail, index, thumb));
+            if (key != null && thumb == null) {
+                requestThumb(key);
+            }
         }
         browserTargets.add(HudSpec.BROWSER_PREV_T);
         browserTargets.add(HudSpec.BROWSER_NEXT_T);
-        SmbSettings settings = SmbSettings.load(this);
-        browserTargets.add(HudSpec.browserMode(
-                "360".equals(settings.projection) ? "360°" : "SBS"));
+        browserTargets.add(HudSpec.browserMode(ProjectionMode.labelOf(
+                SmbSettings.load(this).projection)));
         browserTargets.add(HudSpec.BROWSER_CLOSE_T);
         menuGaze.setLayer(browserTargets.toArray(new HudSpec.Target[0]), false);
         menuGaze.protect(SystemClock.elapsedRealtime(), 260);
         browserGen++;
+    }
+
+    /**
+     * Posters decode one at a time off the UI thread. Each finished frame is
+     * patched into the live target list and only bumps the redraw generation,
+     * so the gaze layer is never rebuilt while the user is looking at it.
+     */
+    private void requestThumb(final String key) {
+        if (key == null || key.length() == 0 || thumbPending.contains(key)) {
+            return;
+        }
+        thumbPending.add(key);
+        Thumbnails.load(this, key, new Runnable() {
+            @Override
+            public void run() {
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        thumbPending.remove(key);
+                        if (overlay != OVERLAY_BROWSER) {
+                            return;
+                        }
+                        android.graphics.Bitmap bmp = Thumbnails.peek(key);
+                        if (bmp == null) {
+                            return;
+                        }
+                        boolean hit = false;
+                        for (HudSpec.Target t : browserTargets) {
+                            if (t.id != HudSpec.Id.BROWSER_ITEM || t.thumb != null
+                                    || t.index < 0 || t.index >= browserRows.size()) {
+                                continue;
+                            }
+                            if (key.equals(browserRows.get(t.index).source)) {
+                                t.thumb = bmp;
+                                hit = true;
+                            }
+                        }
+                        if (hit) {
+                            browserGen++;
+                        }
+                    }
+                });
+            }
+        });
     }
 
     private void handleBrowserTarget(HudSpec.Target t) {
@@ -1526,10 +2139,10 @@ public class PlayerActivity extends Activity
                 break;
             case BROWSER_MODE: {
                 SmbSettings settings = SmbSettings.load(this);
-                settings.projection = "360".equals(settings.projection) ? "sbs" : "360";
+                settings.projection = ProjectionMode.cycleKey(settings.projection);
                 settings.save(this);
-                browserHint = "投影已切换为 " + ("360".equals(settings.projection)
-                        ? "360°" : "SBS");
+                browserHint = "默认投影 " + ProjectionMode.labelOf(settings.projection)
+                        + " · 播放时可再切换";
                 rebuildBrowser();
                 break;
             }
@@ -1575,10 +2188,8 @@ public class PlayerActivity extends Activity
         SmbSettings settings = SmbSettings.load(this);
         String source = settings.url(row.path);
         recordProgress();
-        String mode = "360".equals(settings.projection) ? "360" : "sbs";
         Intent play = new Intent(this, PlayerActivity.class);
         play.putExtra(EXTRA_PATH, source);
-        play.putExtra(EXTRA_MODE, mode);
         play.putExtra(EXTRA_SENSOR, sensorWanted);
         long resume = PlayHistory.positionFor(this, source);
         if (resume > 0) {
@@ -1649,6 +2260,133 @@ public class PlayerActivity extends Activity
         startRecenter();
     }
 
+    /**
+     * One press of the cardboard trigger (screen tap, magnet, or the button on
+     * a paired viewer). It brings the controls up when they are tucked away and
+     * otherwise acts on the target under the reticle; aiming already highlights
+     * it, so there is no dwell timer to wait for.
+     */
+    private void onTrigger() {
+        final long now = SystemClock.elapsedRealtime();
+        if (now - lastTriggerMs < 350) {
+            return;
+        }
+        lastTriggerMs = now;
+        lastActivityMs = now;
+        if (overlay != OVERLAY_NONE) {
+            if (!menuGaze.confirmFocused(now)) {
+                if (overlay == OVERLAY_MENU) {
+                    closeOverlay("菜单已关闭");
+                } else if (overlay == OVERLAY_CONFIRM) {
+                    closeOverlay("已取消退出");
+                } else if (overlay == OVERLAY_BROWSER) {
+                    closeOverlay("已关闭文件管理");
+                } else {
+                    closeOverlay("画面类型已关闭");
+                }
+            }
+            return;
+        }
+        if (computeHudAlpha(now) < 0.45f) {
+            showHud();
+            return;
+        }
+        if (!gaze.confirmFocused(now)) {
+            // Nothing under the reticle: the press opens the full menu, the
+            // same way a tap does in the viewer apps this mirrors.
+            openMenu();
+        }
+    }
+
+    /** The emulator's GL stack renders the lens pass black; straight stereo works. */
+    private static boolean isEmulator() {
+        return Build.FINGERPRINT.startsWith("generic")
+                || Build.FINGERPRINT.contains("emulator")
+                || Build.MODEL.contains("sdk_gphone")
+                || Build.MODEL.contains("Emulator")
+                || Build.MODEL.contains("Android SDK built for");
+    }
+
+    /** Keeps the head-anchored layer out of the camera cutout. */
+    private void applyCutoutInsets(WindowInsets insets) {
+        if (hud == null) {
+            return;
+        }
+        int left = 0;
+        int top = 0;
+        int right = 0;
+        int bottom = 0;
+        if (Build.VERSION.SDK_INT >= 28 && insets != null) {
+            DisplayCutout cutout = insets.getDisplayCutout();
+            if (cutout != null) {
+                left = cutout.getSafeInsetLeft();
+                top = cutout.getSafeInsetTop();
+                right = cutout.getSafeInsetRight();
+                bottom = cutout.getSafeInsetBottom();
+            }
+        }
+        hud.setSafeInset(left, top, right, bottom);
+    }
+
+    // ------------------------------------------------------------- double tap
+
+    /**
+     * Two sharp knocks on the phone's back wake the controls, alongside the
+     * look-up/look-down glance. The low-passed gravity is subtracted first, so
+     * slow head movement (well under the peak threshold) never counts.
+     */
+    private void handleAccel(float[] values) {
+        if (!gravityReady) {
+            System.arraycopy(values, 0, gravity, 0, 3);
+            gravityReady = true;
+            return;
+        }
+        gravity[0] += (values[0] - gravity[0]) * TAP_GRAVITY_ALPHA;
+        gravity[1] += (values[1] - gravity[1]) * TAP_GRAVITY_ALPHA;
+        gravity[2] += (values[2] - gravity[2]) * TAP_GRAVITY_ALPHA;
+        float ax = values[0] - gravity[0];
+        float ay = values[1] - gravity[1];
+        float az = values[2] - gravity[2];
+        float mag = (float) Math.sqrt(ax * ax + ay * ay + az * az);
+        long now = SystemClock.elapsedRealtime();
+        if (mag >= TAP_PEAK) {
+            if (accelWasHigh) {
+                return;
+            }
+            accelWasHigh = true;
+            if (now < tapCooldownUntil) {
+                return;
+            }
+            long gap = now - lastTapMs;
+            if (lastTapMs != 0 && gap >= TAP_GAP_MIN_MS && gap <= TAP_GAP_MAX_MS) {
+                lastTapMs = 0;
+                tapCooldownUntil = now + TAP_COOLDOWN_MS;
+                wakeByTap();
+            } else {
+                lastTapMs = now;
+            }
+        } else if (mag < TAP_REST) {
+            accelWasHigh = false;
+        }
+    }
+
+    /** The picture is already clean and the phone was knocked: show the HUD. */
+    private void wakeByTap() {
+        if (!playing || overlay != OVERLAY_NONE) {
+            return;
+        }
+        if (angularSpeed > 20f) {
+            // A head turn also shakes the accelerometer; a knock happens while
+            // the head is held, and a wake during a turn would re-anchor the
+            // panel under the moving gaze.
+            return;
+        }
+        if (computeHudAlpha(SystemClock.elapsedRealtime()) >= 0.45f) {
+            return;
+        }
+        showHud();
+    }
+
     // ------------------------------------------------------------- sensors
 
     @Override
@@ -1657,22 +2395,8 @@ public class PlayerActivity extends Activity
             lux = Math.max(1f, event.values[0]);
             return;
         }
-        if (event.sensor.getType() != Sensor.TYPE_ROTATION_VECTOR) {
-            return;
-        }
-        SensorManager.getRotationMatrixFromVector(sensorMatrix, event.values);
-        updateRotation();
-        if (!sensorPrimed) {
-            sensorPrimed = true;
-            // The first real head sample defines the video's forward direction,
-            // so playback starts facing the way the headset is worn.
-            applyRecenter();
-            gaze.setAnchor(viewYaw, viewPitch);
-            if (overlay != OVERLAY_NONE) {
-                // The panel may have opened before the first real head sample;
-                // re-anchor it so it sits in front of the user instead of off screen.
-                menuGaze.setAnchor(viewYaw, viewPitch);
-            }
+        if (event.sensor.getType() == Sensor.TYPE_ACCELEROMETER) {
+            handleAccel(event.values);
         }
     }
 
@@ -1681,114 +2405,47 @@ public class PlayerActivity extends Activity
     }
 
     /**
-     * World←camera = recenter * sensorBasis * drag, all row-major 3x3.
-     *
-     * The sensor matrix is remapped from the device frame to the display frame
-     * first: in landscape the device Y axis is horizontal, so using it as the
-     * camera up made a horizontal head turn roll the picture.  The remapped
-     * frame is then converted from Android's East/North/Up world into the
-     * shader's Y-up world (forward = -Z), which also makes the yaw/pitch read
-     * below meaningful.
+     * The Google VR SDK owns the head pose. Angles are read relative to the
+     * anchor the renderer captured at startup or at the last recenter, so 0° is
+     * the centre of the picture and the gaze layer keeps its world-fixed HUD.
+     * The drag trim is only for a device without a head tracker (the emulator).
      */
     private void updateRotation() {
-        int rotation = displayRotation();
-        boolean flipped = false;
-        if (camRotation < 0 || !sensorActive) {
-            camRotation = rotation;
-        } else if (rotation != camRotation) {
-            boolean bothLandscape = isLandscape(camRotation) && isLandscape(rotation);
-            // Portrait<->landscape is a real orientation change and is adopted
-            // at once; 90<->270 (the up/down swap) waits for a 45° tip past
-            // vertical, because a tiny wobble near the boundary used to flip
-            // the view and drop every gaze target onto the reticle.
-            if (!bothLandscape || screenUpComponent(camRotation) < -UP_FLIP_SIN) {
-                camRotation = rotation;
-                flipped = true;
-            }
-        }
-
-        if (sensorActive) {
-            int axisX;
-            int axisY;
-            switch (camRotation) {
-                case Surface.ROTATION_90:
-                    axisX = SensorManager.AXIS_Y;
-                    axisY = SensorManager.AXIS_MINUS_X;
-                    break;
-                case Surface.ROTATION_180:
-                    axisX = SensorManager.AXIS_MINUS_X;
-                    axisY = SensorManager.AXIS_MINUS_Y;
-                    break;
-                case Surface.ROTATION_270:
-                    axisX = SensorManager.AXIS_MINUS_Y;
-                    axisY = SensorManager.AXIS_X;
-                    break;
-                default:
-                    axisX = SensorManager.AXIS_X;
-                    axisY = SensorManager.AXIS_Y;
-                    break;
-            }
-            SensorManager.remapCoordinateSystem(sensorMatrix, axisX, axisY, remapped);
-            // East/North/Up -> shader X/east, Y/up, Z/south.
-            baseRot[0] = remapped[0];
-            baseRot[1] = remapped[1];
-            baseRot[2] = remapped[2];
-            baseRot[3] = remapped[8];
-            baseRot[4] = remapped[9];
-            baseRot[5] = remapped[10];
-            baseRot[6] = -remapped[4];
-            baseRot[7] = -remapped[5];
-            baseRot[8] = -remapped[6];
-        } else {
-            baseRot[0] = 1f;
-            baseRot[1] = 0f;
-            baseRot[2] = 0f;
-            baseRot[3] = 0f;
-            baseRot[4] = 1f;
-            baseRot[5] = 0f;
-            baseRot[6] = 0f;
-            baseRot[7] = 0f;
-            baseRot[8] = 1f;
-        }
-
-        buildPitchYaw(worldMat, -worldYaw, worldPitch);
-        buildYawPitch(dragRot, yaw, pitch);
-        multiply3(headRot, worldMat, baseRot);
-        multiply3(headRot, headRot, dragRot);
         if (renderer != null) {
-            renderer.setRotation(new float[]{
-                    headRot[0], headRot[1], headRot[2],
-                    headRot[3], headRot[4], headRot[5],
-                    headRot[6], headRot[7], headRot[8]
-            });
-        }
-
-        float fx = -headRot[2];
-        float fy = -headRot[5];
-        float fz = -headRot[8];
-        float len = (float) Math.sqrt(fx * fx + fy * fy + fz * fz);
-        if (len > 1e-4f) {
-            float vp = (float) Math.toDegrees(Math.asin(Math.max(-1f, Math.min(1f, fy / len))));
-            viewYaw = GazeController.wrap((float) Math.toDegrees(Math.atan2(fx, -fz)));
-            viewPitch = vp;
-        }
-
-        if (flipped) {
-            // Re-anchor after the swap so the HUD lands where the head now points.
-            gaze.setAnchor(viewYaw, viewPitch);
-            if (overlay != OVERLAY_NONE) {
-                menuGaze.setAnchor(viewYaw, viewPitch);
-            }
+            renderer.setLookOffset(yaw, pitch);
+            viewYaw = GazeController.wrap(renderer.headYawRel() + yaw);
+            viewPitch = Math.max(-80f, Math.min(80f, renderer.headPitchRel() + pitch));
+        } else {
+            viewYaw = GazeController.wrap(yaw);
+            viewPitch = Math.max(-80f, Math.min(80f, pitch));
         }
     }
 
-    private static boolean isLandscape(int rotation) {
-        return rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270;
+    /** The landscape/portrait mapping turned 180° about the screen normal. */
+    private static int oppositeRotation(int rotation) {
+        switch (rotation) {
+            case Surface.ROTATION_90:
+                return Surface.ROTATION_270;
+            case Surface.ROTATION_270:
+                return Surface.ROTATION_90;
+            case Surface.ROTATION_180:
+                return Surface.ROTATION_0;
+            default:
+                return Surface.ROTATION_180;
+        }
     }
 
     /**
-     * How strongly the screen-up axis of {@code rotation} points at world up
-     * (Android world: Z is up, so the device X axis' up part is m[8]).
+     * How strongly the screen-up axis of {@code rotation} points at world up.
+     *
+     * getRotationMatrixFromVector() maps device vectors into the
+     * East/North/Up world, so its columns are the device axes: device X is
+     * (m[0], m[4], m[8]), device Y is (m[1], m[5], m[9]) and device Z is
+     * (m[2], m[6], m[10]). The display up axis is device +Y for ROTATION_0,
+     * -Y for 180, -X for 90 and +X for 270 (exactly the remap updateRotation
+     * applies), so the world-up component is m[9], -m[9], -m[8] and m[8].
+     * Reading m[2]/m[6] compared the screen *normal* with East/North instead,
+     * which made a 90° head turn look like the 180° roll.
      */
     private float screenUpComponent(int rotation) {
         float[] m = sensorMatrix;
@@ -1804,7 +2461,10 @@ public class PlayerActivity extends Activity
         }
     }
 
-    /** Row-major 3x3: rotate about Y by {@code yawDeg}, then about X by {@code pitchDeg}. */
+    /**
+     * Row-major 3x3: rotate about Y by {@code yawDeg}, then about X by
+     * {@code pitchDeg}.
+     */
     private static void buildYawPitch(float[] out, float yawDeg, float pitchDeg) {
         float cy = (float) Math.cos(Math.toRadians(yawDeg));
         float sy = (float) Math.sin(Math.toRadians(yawDeg));
@@ -1873,12 +2533,21 @@ public class PlayerActivity extends Activity
                     return;
                 }
                 VideoDecoder d = source;
-                String mode = panorama ? "360°" : "SBS";
-                String shortMime = mime == null ? "?" : mime.replace("video/", "").toUpperCase();
-                videoFormat = mode + " · " + d.width + "×" + d.height + " · " + shortMime;
-                if (!hardware) {
-                    videoFormat += " · 软解";
+                videoWidth = d.width;
+                videoHeight = d.height;
+                videoSoft = !hardware;
+                videoMime = mime == null ? "?" : mime.replace("video/", "").toUpperCase();
+                // The track shape is the second detection hint: a 2:1 frame is
+                // a matched 360 sphere, 4:1 two spheres, 1:1 a half sphere. Only
+                // applied while the user has not overridden the projection.
+                if (!modeUserSet && videoWidth > 0 && videoHeight > 0) {
+                    ProjectionMode detected = ProjectionMode.detect(
+                            videoName, videoWidth, videoHeight, mode);
+                    if (detected.proj != mode.proj || detected.pack != mode.pack) {
+                        applyProjection(detected, false);
+                    }
                 }
+                videoFormat = formatLine();
                 if (!startSeekApplied && startAtMs > 0 && d.durationMs() > 0) {
                     startSeekApplied = true;
                     renderer.seekTo(startAtMs);

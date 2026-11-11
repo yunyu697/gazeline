@@ -4,9 +4,9 @@ package com.yunyu697.gazeline;
  * Gaze state machine from §1.2–1.7: hysteresis + debounce, 150 ms focus,
  * 250 ms arming, L1/L2/L3 dwell, angle-speed gating, cancel grace, cooldown,
  * the downward wake gesture and the recenter key's two-stage charge. It also
- * keeps the HUD anchor: the controls live at the pitch captured on open and
- * follow the head horizontally, so the panel is always in front of the face
- * instead of being left behind at an oblique angle.
+ * keeps the HUD anchor: the controls live at the direction captured when the
+ * panel opened and never move on their own, so a target stays exactly where
+ * the head found it.
  */
 final class GazeController {
 
@@ -19,7 +19,8 @@ final class GazeController {
 
         void onRecenterReady(HudSpec.Target target);
 
-        void onWake();
+        /** @param up true when the wake came from the top band of the frame. */
+        void onWake(boolean up);
     }
 
     static final class Readout {
@@ -35,6 +36,8 @@ final class GazeController {
         float relPitch;
         /** 0–1 while the wake gesture is being held; 0 otherwise. */
         float wakeProgress;
+        /** Which band that progress belongs to: true for the top of the frame. */
+        boolean wakeUp;
     }
 
     private final Listener listener;
@@ -68,20 +71,43 @@ final class GazeController {
     private float cancelFrom;
 
     private boolean hudVisible = true;
+    /** With a physical trigger there is no dwell: aiming highlights, firing acts. */
+    private boolean triggerMode;
 
     /** Which target set this controller drives: HUD row, S4 menu or exit dialog. */
     private HudSpec.Target[] targets = HudSpec.PLAYING_TARGETS;
     private boolean anchorPull = true;
     private long protectUntil;
 
-    /** Horizontal follow: the panel re-centres once the gaze leaves its band. */
+    /**
+     * The HUD and the in-VR panels are fixed in the world: their anchor is
+     * written only when the panel opens or after a recenter, never by the gaze.
+     */
     private boolean yawFollow = true;
 
-    // Downward wake gesture (head-relative, so it is always reachable).
+    // Wake gesture: the controls come back when the gaze enters the top or the
+    // bottom band of the frame (0° pitch is the video centre after a recenter),
+    // so either direction works no matter where the head was resting.
     private float wakePitchDeg = HudSpec.WAKE_PITCH_DEFAULT;
     private long wakeSince;
     private boolean wakeArmed = true;
     private float wakeProgress;
+    private boolean wakeUp;
+    /**
+     * Low-passed control angles. Head tracking is noisy at the sub-degree
+     * level; feeding the raw angles to the hit test made a held gaze flicker
+     * in and out of a Ø8° disc.
+     */
+    private float smoothYaw;
+    private float smoothPitch;
+    private boolean smoothValid;
+
+    /** What the layer is drawn at: filtered again and held under the dead zone. */
+    private float shownYaw;
+    private float shownPitch;
+    private boolean shownValid;
+    private float shownYawOut;
+    private float shownPitchOut;
 
     GazeController(Listener listener) {
         this.listener = listener;
@@ -105,6 +131,29 @@ final class GazeController {
         this.yawFollow = yawFollow;
     }
 
+    void setTriggerMode(boolean on) {
+        triggerMode = on;
+    }
+
+    /**
+     * Fires the target under the reticle. The focus still needs its short
+     * debounce so a glance across the bar does not pick a neighbour, but the
+     * action itself is the user's one trigger press.
+     */
+    boolean confirmFocused(long now) {
+        if (focus == null) {
+            return false;
+        }
+        confirm(now);
+        refreshReadout(now);
+        return true;
+    }
+
+    /**
+     * Panels are world-fixed: they never ride along with the head, otherwise
+     * the reticle can never cross to a distant card. Only a deliberate stop
+     * past the edge brings the panel back in front of the face.
+     */
     void setWakePitch(float deg) {
         wakePitchDeg = deg;
     }
@@ -125,6 +174,8 @@ final class GazeController {
         anchored = true;
         spent = null;
         spentOutSince = 0;
+        // The drawn layer snaps to the new anchor instead of sliding there.
+        shownValid = false;
         clearFocus();
     }
 
@@ -135,8 +186,16 @@ final class GazeController {
     void update(long now, float viewYaw, float viewPitch, float speedDegPerSec,
                 boolean hudVisible, boolean enabled) {
         this.hudVisible = hudVisible;
-        viewYawCache = viewYaw;
-        viewPitchCache = viewPitch;
+        if (!smoothValid) {
+            smoothYaw = viewYaw;
+            smoothPitch = viewPitch;
+            smoothValid = true;
+        } else {
+            smoothYaw = wrap(smoothYaw + wrap(viewYaw - smoothYaw) * SMOOTH_ALPHA);
+            smoothPitch += (viewPitch - smoothPitch) * SMOOTH_ALPHA;
+        }
+        viewYawCache = smoothYaw;
+        viewPitchCache = smoothPitch;
         if (lastNow == 0) {
             lastNow = now;
             return;
@@ -149,7 +208,7 @@ final class GazeController {
         float dtSec = dt / 1000f;
 
         if (!anchored) {
-            setAnchor(viewYaw, viewPitch);
+            setAnchor(smoothYaw, smoothPitch);
         }
 
         if (!enabled) {
@@ -175,31 +234,35 @@ final class GazeController {
             speedPaused = false;
         }
 
-        updateAnchor(viewYaw, viewPitch, dtSec, hudVisible);
+        updateAnchor(smoothYaw, smoothPitch, now, dtSec, hudVisible);
 
         if (!hudVisible) {
-            // The wake gesture is measured against the head, not against a world
-            // anchor: glancing down far enough always works, even after an
-            // hour of looking around. Once armed it stays armed until the gaze
-            // climbs back out of the band.
+            // Measured against the video centre (pitch 0 after any recenter or
+            // auto-align), not against the head: both the top band and the
+            // bottom band of the frame bring the controls back, and the panel
+            // opens wherever the glance happened. Looking down alone was
+            // unreachable after a head-down recenter.
+            boolean up = smoothPitch >= wakePitchDeg;
+            boolean down = smoothPitch <= -wakePitchDeg;
             if (!wakeArmed) {
-                if (viewPitch > -wakePitchDeg * 0.75f) {
+                if (Math.abs(smoothPitch) < wakePitchDeg * WAKE_REARM_RATIO) {
                     wakeArmed = true;
                 }
                 wakeSince = 0;
                 wakeProgress = 0f;
-            } else if (viewPitch > -wakePitchDeg || speedPaused) {
+            } else if ((!up && !down) || speedPaused) {
                 wakeSince = 0;
                 wakeProgress = 0f;
-            } else if (wakeSince == 0) {
+            } else if (wakeSince == 0 || up != wakeUp) {
                 wakeSince = now;
+                wakeUp = up;
                 wakeProgress = 0f;
             } else if (now - wakeSince >= HudSpec.WAKE_DWELL_MS) {
                 wakeSince = 0;
                 wakeProgress = 0f;
                 wakeArmed = false;
                 refreshReadout(now);
-                listener.onWake();
+                listener.onWake(wakeUp);
                 return;
             } else {
                 wakeProgress = (now - wakeSince) / (float) HudSpec.WAKE_DWELL_MS;
@@ -211,8 +274,8 @@ final class GazeController {
         wakeProgress = 0f;
         wakeArmed = false;
 
-        float py = wrap(viewYaw - anchorYaw);
-        float pp = viewPitch - anchorPitch;
+        float py = wrap(smoothYaw - anchorYaw);
+        float pp = smoothPitch - anchorPitch;
 
         if (spent != null) {
             if (!spent.hit(py, pp, HudSpec.EXIT_RATIO)) {
@@ -290,7 +353,7 @@ final class GazeController {
 
     private void advance(long now, long dt) {
         HudSpec.Target t = focus;
-        if (t == null) {
+        if (t == null || triggerMode) {
             return;
         }
         if (!t.arming) {
@@ -400,33 +463,17 @@ final class GazeController {
         return best;
     }
 
-    private void updateAnchor(float viewYaw, float viewPitch, float dtSec, boolean visible) {
+    private void updateAnchor(float viewYaw, float viewPitch, long now, float dtSec,
+                              boolean visible) {
+        if (yawFollow) {
+            // Nothing here: a panel that moves while the head turns can never
+            // be aimed at. It stays exactly where it opened until setAnchor().
+            return;
+        }
         if (!anchorPull) {
             return;
         }
         if (!visible || speedPaused) {
-            return;
-        }
-        if (yawFollow) {
-            // The panel is a heads-up layer: it sits at a fixed angular offset
-            // from the gaze and only snaps back when the gaze leaves its band.
-            // Snapping drops the focus so the jump cannot hand a dwell to
-            // whatever lands under the reticle; the band is wide enough that
-            // every button can still be aimed at without triggering it.
-            float relYaw = wrap(viewYaw - anchorYaw);
-            float relPitch = viewPitch - anchorPitch;
-            boolean jumpYaw = relYaw > HudSpec.HUD_YAW_KEEP || relYaw < -HudSpec.HUD_YAW_KEEP;
-            boolean jumpPitch = relPitch > HudSpec.ANCHOR_PITCH_UP_LIMIT
-                    || relPitch < HudSpec.ANCHOR_PITCH_DOWN_LIMIT;
-            if (jumpYaw || jumpPitch) {
-                if (jumpYaw) {
-                    anchorYaw = wrap(viewYaw);
-                }
-                if (jumpPitch) {
-                    anchorPitch = viewPitch;
-                }
-                clearFocus();
-            }
             return;
         }
         float relYaw = wrap(viewYaw - anchorYaw);
@@ -464,9 +511,25 @@ final class GazeController {
     }
 
     private void refreshReadout(long now) {
-        readout.relYaw = anchored ? wrap(viewYawCache - anchorYaw) : 0f;
-        readout.relPitch = anchored ? viewPitchCache - anchorPitch : 0f;
+        // Drawing angles are filtered harder than the hit test: a worn phone
+        // jitters by a few tenths of a degree, which made the whole HUD shimmer.
+        // The hit test keeps smoothYaw/smoothPitch so dwell timing is unaffected.
+        float rawYaw = anchored ? wrap(viewYawCache - anchorYaw) : 0f;
+        float rawPitch = anchored ? viewPitchCache - anchorPitch : 0f;
+        if (!shownValid) {
+            shownYaw = rawYaw;
+            shownPitch = rawPitch;
+            shownValid = true;
+        } else {
+            shownYaw = wrap(shownYaw + wrap(rawYaw - shownYaw) * SHOWN_ALPHA);
+            shownPitch += (rawPitch - shownPitch) * SHOWN_ALPHA;
+        }
+        readout.relYaw = deaden(shownYaw, shownYawOut);
+        readout.relPitch = deaden(shownPitch, shownPitchOut);
+        shownYawOut = readout.relYaw;
+        shownPitchOut = readout.relPitch;
         readout.wakeProgress = wakeProgress;
+        readout.wakeUp = wakeUp;
         readout.focus = focus;
         readout.charging = charging;
         readout.ready = ready;
@@ -500,6 +563,19 @@ final class GazeController {
 
     private float viewYawCache;
     private float viewPitchCache;
+
+    /** Per-frame blend for the control angles (~5 frames to settle). */
+    private static final float SMOOTH_ALPHA = 0.45f;
+    /** Softer blend for the drawn angles: the HUD must look nailed in place. */
+    private static final float SHOWN_ALPHA = 0.35f;
+    /** Changes smaller than this are ignored, so sensor tremor never shows. */
+    private static final float SHOWN_DEAD_DEG = 0.25f;
+
+    private static float deaden(float value, float last) {
+        return Math.abs(value - last) < SHOWN_DEAD_DEG ? last : value;
+    }
+    /** The gaze must come back this far inside a band before it can fire again. */
+    private static final float WAKE_REARM_RATIO = 0.6f;
 
     static float wrap(float deg) {
         while (deg > 180f) {

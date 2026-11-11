@@ -29,6 +29,13 @@ $src = Join-Path $proj 'app\src\main'
 $out = Join-Path $proj 'build'
 $resZip = Join-Path $out 'res.zip'
 $dbgResZip = Join-Path $out 'debug-res.zip'
+$gvrResZip = Join-Path $out 'gvr-res.zip'
+# Vendored Google VR SDK (sdk-base): its Java code reads its own resources
+# through com.google.vr.cardboard.R, so that resource set is compiled and
+# linked beside the app's, and R is generated for its package.
+$gvrResDir = Join-Path $src 'gvr-res'
+$gvrPackage = 'com.google.vr.cardboard'
+$jniDir = Join-Path $src 'jniLibs'
 $gen = Join-Path $out 'gen'
 $keystore = Join-Path $proj 'debug.keystore'
 
@@ -59,11 +66,14 @@ if (Test-Path $releaseProps) {
 New-Item -ItemType Directory -Force $out, $gen | Out-Null
 if (Test-Path $resZip) { Remove-Item $resZip -Force }
 if (Test-Path $dbgResZip) { Remove-Item $dbgResZip -Force }
+if (Test-Path $gvrResZip) { Remove-Item $gvrResZip -Force }
 
 Write-Output "== version $version (versionCode $versionCode) =="
 Write-Output '== aapt2 compile =='
 & (Join-Path $bt 'aapt2.exe') compile --dir (Join-Path $src 'res') -o $resZip
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 compile failed' }
+& (Join-Path $bt 'aapt2.exe') compile --dir $gvrResDir -o $gvrResZip
+if ($LASTEXITCODE -ne 0) { throw 'aapt2 compile (GVR) failed' }
 
 # The debug APK uses a different package name, so it installs beside the release
 # APK. Its label must say so, otherwise the launcher shows two identical icons.
@@ -79,6 +89,8 @@ function Link-Apk([string]$variant) {
         'link', '-o', $base, '-I', $jar,
         '--manifest', (Join-Path $src 'AndroidManifest.xml'),
         '-R', $resZip,
+        '-R', $gvrResZip,
+        '--extra-packages', $gvrPackage,
         '--java', $gen,
         '--min-sdk-version', '26',
         '--target-sdk-version', '35',
@@ -111,6 +123,8 @@ if (Test-Path $classes) { Remove-Item $classes -Recurse -Force }
 New-Item -ItemType Directory -Force $classes | Out-Null
 $javaFiles = @(Get-ChildItem (Join-Path $src 'java\com\yunyu697\gazeline') -Filter *.java | ForEach-Object { $_.FullName })
 $javaFiles += (Join-Path $gen 'com\yunyu697\gazeline\R.java')
+$gvrR = Join-Path $gen 'com\google\vr\cardboard\R.java'
+if (Test-Path $gvrR) { $javaFiles += $gvrR }
 # Vendored jars live in app/libs (SMB client + its runtime dependencies).
 $libsDir = Join-Path $proj 'app\libs'
 $libJars = @()
@@ -164,11 +178,25 @@ foreach ($v in $variants) {
                 $dexStream.Dispose()
             } finally { $dst.Dispose() }
         }
+        # Native libraries are stored uncompressed so the loader can map them
+        # straight from the APK; zipalign -p then page-aligns them.
+        if (Test-Path $jniDir) {
+            foreach ($so in (Get-ChildItem $jniDir -Recurse -Filter *.so)) {
+                $abi = $so.Directory.Name
+                $entry = $zip.CreateEntry("lib/$abi/$($so.Name)", [System.IO.Compression.CompressionLevel]::NoCompression)
+                $dst = $entry.Open()
+                try {
+                    $soStream = [System.IO.File]::OpenRead($so.FullName)
+                    $soStream.CopyTo($dst)
+                    $soStream.Dispose()
+                } finally { $dst.Dispose() }
+            }
+        }
     } finally { $zip.Dispose() }
 
     $aligned = Join-Path $out "aligned-$v.apk"
     if (Test-Path $aligned) { Remove-Item $aligned -Force }
-    & (Join-Path $bt 'zipalign.exe') -f 4 $unsigned $aligned
+    & (Join-Path $bt 'zipalign.exe') -f -p 4 $unsigned $aligned
     if ($LASTEXITCODE -ne 0) { throw "zipalign ($v) failed" }
 
     $final = Join-Path $out "gazeline-$version-$v.apk"

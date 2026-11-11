@@ -54,6 +54,10 @@ public class CalibActivity extends Activity
     private String hint = "";
     private long hintUntil;
     private boolean finishing;
+    /** Settle-align: recentre once the head is actually in the headset. */
+    private boolean aligned;
+    private boolean touched;
+    private long steadySince;
 
     private final float[] sensorMatrix = new float[16];
     private final float[] remapped = new float[16];
@@ -62,8 +66,8 @@ public class CalibActivity extends Activity
     private final float[] headRot = new float[9];
     private final float[] mulTmp = new float[9];
 
-    /** sin 45°: an up/down swap needs the phone rolled 45° past vertical. */
-    private static final float UP_FLIP_SIN = 0.70710678f;
+    /** Playback's 画面翻转 toggle; the card follows whatever the film does. */
+    private boolean flipImage;
     private int camRotation = -1;
 
     private float yaw;
@@ -106,6 +110,8 @@ public class CalibActivity extends Activity
 
         params = CalibParams.load(this);
         saved = params.copy();
+        flipImage = getSharedPreferences("gazeline_display", MODE_PRIVATE)
+                .getBoolean("flip", false);
 
         sensors = (SensorManager) getSystemService(SENSOR_SERVICE);
         if (sensors != null) {
@@ -154,6 +160,9 @@ public class CalibActivity extends Activity
         // as it is held now, not where it was when the page was first opened.
         updateRotation();
         anchorHere();
+        aligned = false;
+        steadySince = 0;
+        touched = false;
         prevTickMs = 0;
         ui.post(tick);
     }
@@ -212,6 +221,8 @@ public class CalibActivity extends Activity
         prevViewPitch = viewPitch;
         prevTickMs = now;
 
+        maybeAlign(now);
+
         if (phase == CalibView.PHASE_SELF_TEST) {
             long elapsed = now - selfTestStart;
             long remain = SELF_TEST_MS - elapsed;
@@ -233,6 +244,37 @@ public class CalibActivity extends Activity
         view.setView(relYaw, relPitch);
         view.setGaze(gaze.readout());
         checkStepWarning();
+    }
+
+    /**
+     * The page can be opened while the phone still lies on a table; anchoring
+     * to that pose leaves the card above the eyes once the headset is on. Once
+     * the head has settled upright, bring the card in front (a recenter), then
+     * leave it alone for the rest of the visit.
+     */
+    private void maybeAlign(long now) {
+        if (aligned || touched || !sensorActive || sensorFallback) {
+            return;
+        }
+        if (now - openedMs < 700) {
+            steadySince = 0;
+            return;
+        }
+        boolean upright = Math.abs(screenUpComponent(camRotation)) >= 0.45f;
+        if (!upright || angularSpeed >= 18f) {
+            steadySince = 0;
+            return;
+        }
+        if (steadySince == 0) {
+            steadySince = now;
+            return;
+        }
+        if (now - steadySince < 650) {
+            return;
+        }
+        aligned = true;
+        steadySince = 0;
+        anchorHere();
     }
 
     private void checkStepWarning() {
@@ -315,11 +357,12 @@ public class CalibActivity extends Activity
     }
 
     @Override
-    public void onWake() {
+    public void onWake(boolean up) {
     }
 
     @Override
     public void onGazeConfirm(HudSpec.Target target) {
+        touched = true;
         feedback.confirm();
         switch (target.id) {
             case TEST_CLEAR:
@@ -500,18 +543,19 @@ public class CalibActivity extends Activity
             camRotation = rotation;
         } else if (rotation != camRotation) {
             boolean bothLandscape = isLandscape(camRotation) && isLandscape(rotation);
-            if (!bothLandscape || screenUpComponent(camRotation) < -UP_FLIP_SIN) {
+            if (!bothLandscape) {
                 camRotation = rotation;
                 // An up/down swap mirrors the whole basis; re-anchor afterwards
                 // so the panel does not end up behind the user's head.
                 flipped = true;
             }
         }
+        int rot = flipImage ? oppositeRotation(camRotation) : camRotation;
 
         if (live) {
             int axisX;
             int axisY;
-            switch (camRotation) {
+            switch (rot) {
                 case Surface.ROTATION_90:
                     axisX = SensorManager.AXIS_Y;
                     axisY = SensorManager.AXIS_MINUS_X;
@@ -585,6 +629,19 @@ public class CalibActivity extends Activity
 
     private static boolean isLandscape(int rotation) {
         return rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270;
+    }
+
+    private static int oppositeRotation(int rotation) {
+        switch (rotation) {
+            case Surface.ROTATION_90:
+                return Surface.ROTATION_270;
+            case Surface.ROTATION_270:
+                return Surface.ROTATION_90;
+            case Surface.ROTATION_180:
+                return Surface.ROTATION_0;
+            default:
+                return Surface.ROTATION_180;
+        }
     }
 
     /** How strongly the screen-up axis of {@code rotation} points at world up. */

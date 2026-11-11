@@ -1,11 +1,13 @@
 package com.yunyu697.gazeline;
 
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.PorterDuff;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.os.SystemClock;
@@ -40,8 +42,14 @@ final class HudView extends View {
         GazeController.Readout gaze;
         float hudAlpha = 1f;
         float wakeAlpha = 0f;
-        /** 0–1 while the downward glance is being held; drawn at the screen edge. */
+        /** One-time lesson about the top/bottom edges, then nothing at rest. */
+        long wakeHintUntil;
+        /** 0–1 while the wake glance is being held; drawn at the screen edge. */
         float wakeProgress = 0f;
+        /** Which edge that progress belongs to: true for the top of the eye. */
+        boolean wakeUp;
+        /** True while the timeline is being dragged; the bar reads the target. */
+        boolean scrubbing;
         float maskAlpha = 0f;
         float flashAlpha = 0f;
         /** Non-zero while the recenter grace countdown runs (seconds left). */
@@ -75,6 +83,11 @@ final class HudView extends View {
         String volumeText = "";
         String serverText = "";
         String subStyleText = "";
+        /** Current projection label, e.g. "360°" / "鱼眼180°", and its packing. */
+        String projText = "平面";
+        String packText = "单眼";
+        /** Picker row that is currently in force (-1 when none matches). */
+        int projOption = -1;
         float subtitleScale = 1f;
         boolean subtitleOutline = true;
         boolean defaultFocusHint;
@@ -88,9 +101,12 @@ final class HudView extends View {
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint arcPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint maskPaint = new Paint();
+    private final Paint bitmapPaint =
+            new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final Path path = new Path();
     private final RectF rect = new RectF();
     private final RectF rect2 = new RectF();
+    private final android.graphics.Rect srcRect = new android.graphics.Rect();
 
     private final Typeface regular = Typeface.create("sans-serif", Typeface.NORMAL);
     private final Typeface medium = Typeface.create("sans-serif-medium", Typeface.NORMAL);
@@ -105,7 +121,16 @@ final class HudView extends View {
     private float ppd;
     private float pxPerDeg = 10f;
 
+    // Camera cutout: the HUD keeps its content inside the safe box while the
+    // video keeps the full screen. Symmetric horizontally so both eyes shift by
+    // the same amount and stay matched.
+    private int safeLeft;
+    private int safeTop;
+    private int safeRight;
+    private int safeBottom;
+
     private long lastSignature;
+    private long frameNow;
 
     private static final GazeController.Readout EMPTY = new GazeController.Readout();
 
@@ -147,12 +172,50 @@ final class HudView extends View {
     }
 
     void setFrame(Frame f, long now) {
+        frameNow = now;
         copyFrame(f);
         long sig = signature(f);
         if (sig != lastSignature) {
             lastSignature = sig;
             postInvalidateOnAnimation();
         }
+    }
+
+    /** Change token of the last frame, so a caller can skip redundant redraws. */
+    long signature() {
+        return lastSignature;
+    }
+
+    /**
+     * Draws one eye into an offscreen bitmap for the VR renderer. The GvrView
+     * pipeline cannot host a normal child View (it would be neither stereo nor
+     * lens-distorted), so the same drawing code runs into a texture instead.
+     * One eye's square canvas is stretched over both viewports by the renderer;
+     * a flat HUD at the same position in both eyes reads as infinitely far.
+     */
+    void renderEye(Bitmap bmp) {
+        Canvas c = new Canvas(bmp);
+        c.drawColor(0, PorterDuff.Mode.CLEAR);
+        int w = bmp.getWidth();
+        int h = bmp.getHeight();
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        eyeCx = w / 2f;
+        eyeCy = h / 2f;
+        halfW = w * 0.55f;
+        pxPerDeg = halfW * 0.017453292f;
+        if (frame.maskAlpha > 0f) {
+            maskPaint.setColor(0xFF04070C);
+            maskPaint.setAlpha((int) (Math.min(1f, frame.maskAlpha) * 255));
+            c.drawRect(0, 0, w, h, maskPaint);
+        }
+        if (frame.overlay != 0 && frame.overlayAlpha > 0.01f) {
+            maskPaint.setColor(0xFF04070C);
+            maskPaint.setAlpha((int) (0.46f * frame.overlayAlpha * 255));
+            c.drawRect(0, 0, w, h, maskPaint);
+        }
+        drawEye(c);
     }
 
     private void copyFrame(Frame f) {
@@ -168,6 +231,10 @@ final class HudView extends View {
         frame.gaze = f.gaze;
         frame.hudAlpha = f.hudAlpha;
         frame.wakeAlpha = f.wakeAlpha;
+        frame.wakeHintUntil = f.wakeHintUntil;
+        frame.wakeProgress = f.wakeProgress;
+        frame.wakeUp = f.wakeUp;
+        frame.scrubbing = f.scrubbing;
         frame.maskAlpha = f.maskAlpha;
         frame.flashAlpha = f.flashAlpha;
         frame.recenterCountdown = f.recenterCountdown;
@@ -195,6 +262,9 @@ final class HudView extends View {
         frame.volumeText = f.volumeText;
         frame.serverText = f.serverText;
         frame.subStyleText = f.subStyleText;
+        frame.projText = f.projText;
+        frame.packText = f.packText;
+        frame.projOption = f.projOption;
         frame.subtitleScale = f.subtitleScale;
         frame.subtitleOutline = f.subtitleOutline;
         frame.defaultFocusHint = f.defaultFocusHint;
@@ -214,7 +284,10 @@ final class HudView extends View {
         sig = sig * 31 + (f.durationMs / 1000);
         sig = sig * 31 + (int) (f.hudAlpha * 500);
         sig = sig * 31 + (int) (f.wakeAlpha * 500);
+        sig = sig * 31 + (int) (f.wakeHintUntil / 400);
         sig = sig * 31 + (int) (f.wakeProgress * 200);
+        sig = sig * 31 + (f.wakeUp ? 1 : 0);
+        sig = sig * 31 + (f.scrubbing ? 1 : 0);
         sig = sig * 31 + (int) (f.maskAlpha * 500);
         sig = sig * 31 + (int) (f.flashAlpha * 500);
         sig = sig * 31 + (int) (f.recenterCountdown * 10);
@@ -233,6 +306,9 @@ final class HudView extends View {
         sig = sig * 31 + (f.volumeText == null ? 0 : f.volumeText.hashCode());
         sig = sig * 31 + (f.serverText == null ? 0 : f.serverText.hashCode());
         sig = sig * 31 + (f.subStyleText == null ? 0 : f.subStyleText.hashCode());
+        sig = sig * 31 + (f.projText == null ? 0 : f.projText.hashCode());
+        sig = sig * 31 + (f.packText == null ? 0 : f.packText.hashCode());
+        sig = sig * 31 + f.projOption;
         sig = sig * 31 + (int) (f.subtitleScale * 100);
         sig = sig * 31 + (f.subtitleOutline ? 1 : 0);
         sig = sig * 31 + (f.defaultFocusHint ? 1 : 0);
@@ -263,7 +339,34 @@ final class HudView extends View {
 
     @Override
     protected void onSizeChanged(int w, int h, int ow, int oh) {
-        ppd = Math.max(1f, (w / 2f) / 90f);
+        updateMetrics(w);
+    }
+
+    /**
+     * Display cutout, in display pixels for the current rotation. The largest
+     * horizontal inset is mirrored to both sides so the stereo pair stays
+     * centred; top/bottom only move the vertical centre.
+     */
+    void setSafeInset(int left, int top, int right, int bottom) {
+        int horizontal = Math.max(0, Math.max(left, right));
+        int newTop = Math.max(0, top);
+        int newBottom = Math.max(0, bottom);
+        if (horizontal == safeLeft && newTop == safeTop && newBottom == safeBottom) {
+            return;
+        }
+        safeLeft = horizontal;
+        safeRight = horizontal;
+        safeTop = newTop;
+        safeBottom = newBottom;
+        updateMetrics(getWidth());
+        postInvalidateOnAnimation();
+    }
+
+    private void updateMetrics(int w) {
+        float usable = Math.max(1, w - safeLeft - safeRight);
+        halfW = usable / 4f;
+        pxPerDeg = halfW * 0.017453292f;
+        ppd = Math.max(1f, usable / 2f / 90f);
     }
 
     @Override
@@ -274,7 +377,7 @@ final class HudView extends View {
         if (w <= 0 || h <= 0) {
             return;
         }
-        halfW = w / 4f;
+        halfW = Math.max(1, w - safeLeft - safeRight) / 4f;
         pxPerDeg = halfW * 0.017453292f;
 
         if (frame.maskAlpha > 0f) {
@@ -290,8 +393,8 @@ final class HudView extends View {
         }
 
         for (int eye = 0; eye < 2; eye++) {
-            eyeCx = halfW + eye * halfW * 2f;
-            eyeCy = h / 2f;
+            eyeCx = safeLeft + halfW + eye * halfW * 2f;
+            eyeCy = safeTop + (h - safeTop - safeBottom) / 2f;
             drawEye(c);
         }
     }
@@ -309,6 +412,8 @@ final class HudView extends View {
                 drawMenu(c, mg == null ? EMPTY : mg, frame.overlayAlpha);
             } else if (frame.overlay == 3) {
                 drawBrowser(c, mg == null ? EMPTY : mg, frame.overlayAlpha);
+            } else if (frame.overlay == 4) {
+                drawProjPanel(c, mg == null ? EMPTY : mg, frame.overlayAlpha);
             } else {
                 drawConfirm(c, mg == null ? EMPTY : mg, frame.overlayAlpha);
             }
@@ -330,6 +435,8 @@ final class HudView extends View {
                 drawTarget(c, t, relYaw, relPitch, g, a);
             }
             drawTarget(c, HudSpec.RECENTER, relYaw, relPitch, g, a);
+            drawTarget(c, HudSpec.FILES, relYaw, relPitch, g, a);
+            drawTarget(c, HudSpec.PROJ_T, relYaw, relPitch, g, a);
             drawReticle(c, a);
             drawGazeText(c, relYaw, relPitch, g, a);
         }
@@ -516,7 +623,7 @@ final class HudView extends View {
         float trackH = Math.max(3f, rect.height());
         float cy = rect.centerY();
 
-        tint(fillPaint, 0x30FFFFFF, (int) (alpha * 255));
+        tint(fillPaint, frame.scrubbing ? 0x5CFFFFFF : 0x30FFFFFF, (int) (alpha * 255));
         rect2.set(rect.left, cy - trackH * 0.5f, rect.right, cy + trackH * 0.5f);
         c.drawRoundRect(rect2, trackH * 0.5f, trackH * 0.5f, fillPaint);
 
@@ -528,7 +635,8 @@ final class HudView extends View {
         c.drawRoundRect(rect2, trackH * 0.5f, trackH * 0.5f, fillPaint);
 
         tint(fillPaint, 0xFFFFFFFF, (int) (alpha * 235));
-        c.drawCircle(fillRight, cy, Math.max(3.5f, trackH * 1.1f), fillPaint);
+        c.drawCircle(fillRight, cy, Math.max(3.5f, trackH * (frame.scrubbing ? 1.8f : 1.1f)),
+                fillPaint);
 
         textPaint.setTypeface(numbers);
         textPaint.setTextSize(fontPx(1.35f));
@@ -586,6 +694,15 @@ final class HudView extends View {
 
         int icon = main ? 0xFF1A1204 : HudSpec.C_TEXT;
         drawIcon(c, t.id, cx, cy, r, icon, alpha);
+
+        if (t.id == HudSpec.Id.FILES || t.id == HudSpec.Id.PROJ) {
+            boolean files = t.id == HudSpec.Id.FILES;
+            textPaint.setTypeface(regular);
+            textPaint.setTextSize(fontPx(1.25f));
+            tint(textPaint, focused ? 0xFFFFE0B0 : 0x8AFFFFFF, (int) (alpha * 220));
+            textPaint.setTextAlign(Paint.Align.CENTER);
+            c.drawText(files ? "文件" : "类型", cx, cy + r + fontPx(1.45f), textPaint);
+        }
 
         if (focused || cancelling) {
             float progress = focused ? g.progress : cancellingProgress;
@@ -709,6 +826,31 @@ final class HudView extends View {
                 c.drawCircle(cx - u * 0.58f, cy, dot, fillPaint);
                 c.drawCircle(cx, cy, dot, fillPaint);
                 c.drawCircle(cx + u * 0.58f, cy, dot, fillPaint);
+                break;
+            }
+            case FILES: {
+                float w2 = u * 0.95f;
+                float h2 = u * 0.76f;
+                strokePaint.setStrokeWidth(Math.max(1.4f, r * 0.075f));
+                rect.set(cx - w2, cy - h2 * 0.58f, cx + w2, cy + h2 * 0.8f);
+                c.drawRoundRect(rect, u * 0.2f, u * 0.2f, strokePaint);
+                path.reset();
+                path.moveTo(cx - w2 * 0.88f, cy - h2 * 0.58f);
+                path.lineTo(cx - w2 * 0.88f, cy - h2 * 0.94f);
+                path.lineTo(cx - w2 * 0.12f, cy - h2 * 0.94f);
+                path.lineTo(cx + w2 * 0.1f, cy - h2 * 0.58f);
+                path.close();
+                c.drawPath(path, fillPaint);
+                break;
+            }
+            case PROJ: {
+                // A globe: sphere, one meridian, the horizon line.
+                float rr = u * 0.86f;
+                strokePaint.setStrokeWidth(Math.max(1.3f, r * 0.07f));
+                c.drawCircle(cx, cy, rr, strokePaint);
+                rect.set(cx - rr * 0.42f, cy - rr, cx + rr * 0.42f, cy + rr);
+                c.drawOval(rect, strokePaint);
+                c.drawLine(cx - rr, cy, cx + rr, cy, strokePaint);
                 break;
             }
             default:
@@ -895,7 +1037,7 @@ final class HudView extends View {
             tint(textPaint, HudSpec.C_TEXT3, (int) (alpha * 220));
             textPaint.setTextAlign(Paint.Align.LEFT);
             c.drawText(frame.menuPage == 0
-                            ? "注视图末「更多设置」翻页" : "注视图末「返回」回上一页",
+                            ? "注视图末「返回」关闭菜单" : "注视图末「返回」回上一页",
                     left, fy1, textPaint);
         }
         if (frame.menuWarn) {
@@ -907,6 +1049,59 @@ final class HudView extends View {
             textPaint.setTextAlign(Paint.Align.RIGHT);
             c.drawText(frame.menuPage == 0
                     ? "视线移出面板 1.2 s 关闭" : "退出需二次确认", right, fy2, textPaint);
+        }
+    }
+
+    /**
+     * Projection picker opened from the HUD's globe key: the same row drawing as
+     * the menu, a short header and no page footer, so the seven choices fit one
+     * glance instead of being cycled one at a time.
+     */
+    private void drawProjPanel(Canvas c, GazeController.Readout g, float alpha) {
+        float yaw0 = -g.relYaw;
+        float pitch0 = -g.relPitch;
+        if (!onScreen(yaw0, pitch0)) {
+            return;
+        }
+        angularRect(yaw0, pitch0, HudSpec.PROJ_W, HudSpec.PROJ_H, rect);
+        drawPanel(c, rect, 16f, 0xE60B1018, 0x30FFFFFF, alpha);
+        float left = rect.left + 16f;
+        float right = rect.right - 16f;
+
+        textPaint.setTypeface(medium);
+        textPaint.setTextSize(fontPx(2.05f));
+        tint(textPaint, HudSpec.C_TEXT, (int) (alpha * 255));
+        textPaint.setTextAlign(Paint.Align.LEFT);
+        c.drawText("画面类型", left, sy(pitch0 + HudSpec.PROJ_HEADER_PITCH), textPaint);
+
+        textPaint.setTypeface(regular);
+        textPaint.setTextSize(fontPx(1.15f));
+        tint(textPaint, HudSpec.C_TEXT3, (int) (alpha * 220));
+        textPaint.setTextAlign(Paint.Align.RIGHT);
+        c.drawText("当前 " + frame.projText + " · " + frame.packText,
+                right, sy(pitch0 + HudSpec.PROJ_HEADER_PITCH), textPaint);
+
+        tint(fillPaint, 0x1FFFFFFF, (int) (alpha * 255));
+        float dy = sy(pitch0 + HudSpec.PROJ_DIVIDER_PITCH);
+        c.drawRect(left, dy, right, dy + 1f, fillPaint);
+
+        for (HudSpec.Target row : HudSpec.PROJ_ROWS) {
+            drawMenuRow(c, row, g, alpha);
+        }
+
+        textPaint.setTypeface(regular);
+        textPaint.setTextSize(fontPx(1.08f));
+        float fy = sy(pitch0 + HudSpec.PROJ_FOOTER_PITCH);
+        if (frame.overlayHint.length() > 0) {
+            tint(textPaint, HudSpec.C_AMBER, (int) (alpha * 240));
+            textPaint.setTextAlign(Paint.Align.CENTER);
+            c.drawText(frame.overlayHint, rect.centerX(), fy, textPaint);
+        } else {
+            tint(textPaint, HudSpec.C_TEXT3, (int) (alpha * 220));
+            textPaint.setTextAlign(Paint.Align.LEFT);
+            c.drawText("选完立即生效 · 记住选择", left, fy, textPaint);
+            textPaint.setTextAlign(Paint.Align.RIGHT);
+            c.drawText("视线移出面板关闭", right, fy, textPaint);
         }
     }
 
@@ -953,7 +1148,7 @@ final class HudView extends View {
         textPaint.setTextSize(fontPx(1.5f));
         tint(textPaint, danger ? HudSpec.C_RED : HudSpec.C_TEXT, (int) (alpha * 255));
         textPaint.setTextAlign(Paint.Align.LEFT);
-        c.drawText(t.id.label(), lx, rect.centerY() - fontPx(0.62f), textPaint);
+        c.drawText(t.text != null ? t.text : t.id.label(), lx, rect.centerY() - fontPx(0.62f), textPaint);
 
         String sub;
         if (focused && g.charging) {
@@ -961,7 +1156,7 @@ final class HudView extends View {
         } else if (focused) {
             sub = "停留 " + oneDecimal(t.levelMs / 1000f) + " 秒 · " + actionLabel(t);
         } else {
-            sub = secondaryOf(t);
+            sub = t.text != null && t.detail != null ? t.detail : secondaryOf(t);
         }
         textPaint.setTypeface(regular);
         textPaint.setTextSize(fontPx(1.0f));
@@ -977,7 +1172,9 @@ final class HudView extends View {
         } else if (focused) {
             value = oneDecimal(t.levelMs / 1000f) + " s";
         } else {
-            value = valueOf(t, frame);
+            value = t.text != null
+                    ? (t.index == frame.projOption ? "当前" : "")
+                    : valueOf(t, frame);
         }
         textPaint.setTypeface(medium);
         textPaint.setTextSize(fontPx(1.25f));
@@ -1012,6 +1209,8 @@ final class HudView extends View {
         }
         angularRect(yaw0, pitch0, HudSpec.BROWSER_W, HudSpec.BROWSER_H, rect);
         drawPanel(c, rect, 16f, 0xF20B1018, 0x33FFFFFF, alpha);
+        // Children reuse the shared rect, so the panel centre is read once here.
+        final float panelCx = rect.centerX();
         float left = rect.left + 16f;
         float right = rect.right - 16f;
 
@@ -1047,12 +1246,12 @@ final class HudView extends View {
             textPaint.setTextSize(fontPx(1.35f));
             tint(textPaint, HudSpec.C_TEXT3, (int) (alpha * 230));
             textPaint.setTextAlign(Paint.Align.CENTER);
-            c.drawText("此目录没有可播放的视频", rect.centerX(),
-                    sy(pitch0 + HudSpec.BROWSER_ROW_PITCH[2]), textPaint);
+            c.drawText("此目录没有可播放的视频", panelCx,
+                    sy(pitch0 + HudSpec.BROWSER_CARD_PITCH[0] - 4f), textPaint);
         } else {
             for (HudSpec.Target t : targets) {
                 if (t.id == HudSpec.Id.BROWSER_ITEM) {
-                    drawBrowserRow(c, t, g, alpha);
+                    drawBrowserCard(c, t, g, alpha);
                 }
             }
         }
@@ -1074,14 +1273,23 @@ final class HudView extends View {
         } else if (frame.browserHint != null && frame.browserHint.length() > 0) {
             hint = frame.browserHint;
             tint(textPaint, HudSpec.C_AMBER, (int) (alpha * 235));
+        } else if (g.focus != null && g.focus.id == HudSpec.Id.BROWSER_MODE) {
+            // The globe has no room for a caption, so its meaning lives here.
+            hint = "投影：" + (g.focus.text == null ? "自动" : g.focus.text) + " · 注视切换";
+            tint(textPaint, HudSpec.C_AMBER, (int) (alpha * 235));
         } else {
             hint = "★ 收藏夹优先显示 · 返回键退出";
         }
-        c.drawText(hint, rect.centerX(), sy(pitch0 + HudSpec.BROWSER_HINT_PITCH), textPaint);
+        c.drawText(hint, panelCx, sy(pitch0 + HudSpec.BROWSER_HINT_PITCH), textPaint);
     }
 
-    private void drawBrowserRow(Canvas c, HudSpec.Target t, GazeController.Readout g,
-                                float alpha) {
+    /**
+     * One file card: poster on top, two lines of copy underneath. The poster is
+     * a frame the player decoded in the background; until it arrives a dark
+     * placeholder keeps the layout stable.
+     */
+    private void drawBrowserCard(Canvas c, HudSpec.Target t, GazeController.Readout g,
+                                 float alpha) {
         float yaw = t.yaw - g.relYaw;
         float pitch = t.pitch - g.relPitch;
         if (!onScreen(yaw, pitch)) {
@@ -1089,43 +1297,98 @@ final class HudView extends View {
         }
         boolean focused = g.focus == t;
         angularRect(yaw, pitch, t.barW, t.barH, rect);
-        tint(fillPaint, focused ? 0x1AFFB454 : 0x0FFFFFFF, (int) (alpha * 255));
-        c.drawRoundRect(rect, 8f, 8f, fillPaint);
-        tint(strokePaint, focused ? HudSpec.C_AMBER : 0x24FFFFFF,
-                (int) (alpha * (focused ? 255 : 205)));
-        strokePaint.setStyle(Paint.Style.STROKE);
-        strokePaint.setStrokeWidth(focused ? 2.2f : 1.1f);
-        c.drawRoundRect(rect, 8f, 8f, strokePaint);
+        tint(fillPaint, focused ? 0x24FFB454 : 0x12FFFFFF, (int) (alpha * 255));
+        c.drawRoundRect(rect, 10f, 10f, fillPaint);
+
+        float pad = Math.max(4f, rect.width() * 0.045f);
+        float copyH = rect.height() * 0.34f;
+        float thumbH = rect.height() - copyH - pad * 2.2f;
+        float tw = rect.width() - pad * 2f;
+        if (thumbH > 4f && tw > 4f) {
+            float left = rect.left + pad;
+            float top = rect.top + pad;
+            if (t.thumb != null) {
+                drawCentreCrop(c, t.thumb, left, top, tw, thumbH);
+            } else {
+                tint(fillPaint, 0x1FFFFFFF, (int) (alpha * 255));
+                c.drawRect(left, top, left + tw, top + thumbH, fillPaint);
+                tint(fillPaint, 0x33FFFFFF, (int) (alpha * 255));
+                float cx = left + tw * 0.5f;
+                float cy = top + thumbH * 0.5f;
+                float s = Math.min(tw, thumbH) * 0.16f;
+                Path tri = new Path();
+                tri.moveTo(cx - s * 0.6f, cy - s);
+                tri.lineTo(cx + s * 0.9f, cy);
+                tri.lineTo(cx - s * 0.6f, cy + s);
+                tri.close();
+                c.drawPath(tri, fillPaint);
+            }
+            // A quiet border keeps a bright poster from bleeding into the panel.
+            tint(strokePaint, 0x26FFFFFF, (int) (alpha * 235));
+            strokePaint.setStyle(Paint.Style.STROKE);
+            strokePaint.setStrokeWidth(1f);
+            c.drawRect(left, top, left + tw, top + thumbH, strokePaint);
+        }
 
         textPaint.setTypeface(medium);
-        textPaint.setTextSize(fontPx(1.4f));
+        textPaint.setTextSize(fontPx(1.12f));
         tint(textPaint, HudSpec.C_TEXT, (int) (alpha * 250));
         textPaint.setTextAlign(Paint.Align.LEFT);
-        float titleMax = rect.width() * 0.62f;
         String title = t.text == null ? "" : t.text;
-        String fit = ellipsizeEnd(title, titleMax);
-        c.drawText(fit, rect.left + 12f,
-                rect.centerY() + textPaint.getTextSize() * 0.36f, textPaint);
+        float maxW = rect.width() - pad * 2f;
+        c.drawText(ellipsizeEnd(title, maxW), rect.left + pad,
+                rect.bottom - copyH + textPaint.getTextSize() * 1.25f, textPaint);
 
         if (t.detail != null && t.detail.length() > 0) {
+            textPaint.setTypeface(regular);
+            textPaint.setTextSize(fontPx(0.95f));
             tint(textPaint, 0xFF98A6BC, (int) (alpha * 235));
-            textPaint.setTextSize(fontPx(1.05f));
-            textPaint.setTextAlign(Paint.Align.RIGHT);
-            String det = ellipsizeEnd(t.detail, rect.width() * 0.36f);
-            c.drawText(det, rect.right - 12f,
-                    rect.centerY() + fontPx(0.35f), textPaint);
+            c.drawText(ellipsizeEnd(t.detail, maxW), rect.left + pad,
+                    rect.bottom - textPaint.getTextSize() * 0.55f, textPaint);
         }
 
         if (focused) {
+            tint(strokePaint, HudSpec.C_AMBER, (int) (alpha * 255));
+            strokePaint.setStyle(Paint.Style.STROKE);
+            strokePaint.setStrokeWidth(2.2f);
+            c.drawRoundRect(rect, 10f, 10f, strokePaint);
             float prog = g.charging ? g.progress : 0f;
-            float h = Math.max(2f, rect.height() * 0.06f);
+            float h = Math.max(2f, rect.height() * 0.045f);
             tint(fillPaint, HudSpec.C_AMBER, (int) (alpha * 245));
-            c.drawRect(rect.left + 8f, rect.bottom - h - 3f,
+            c.drawRect(rect.left + 8f, rect.bottom - h - 4f,
                     rect.left + 8f + (rect.width() - 16f) * prog,
-                    rect.bottom - 3f, fillPaint);
+                    rect.bottom - 4f, fillPaint);
+        } else {
+            tint(strokePaint, 0x24FFFFFF, (int) (alpha * 205));
+            strokePaint.setStyle(Paint.Style.STROKE);
+            strokePaint.setStrokeWidth(1.1f);
+            c.drawRoundRect(rect, 10f, 10f, strokePaint);
         }
     }
 
+    /** Fill the box with the poster, cropping evenly instead of stretching it. */
+    private void drawCentreCrop(Canvas c, android.graphics.Bitmap bmp,
+                                float left, float top, float w, float h) {
+        float bw = bmp.getWidth();
+        float bh = bmp.getHeight();
+        float scale = Math.max(w / bw, h / bh);
+        float sw = w / scale;
+        float sh = h / scale;
+        android.graphics.Rect src = srcRect;
+        src.set((int) ((bw - sw) * 0.5f), (int) ((bh - sh) * 0.5f),
+                (int) ((bw + sw) * 0.5f), (int) ((bh + sh) * 0.5f));
+        RectF dst = new RectF(left, top, left + w, top + h);
+        c.save();
+        c.clipRect(dst);
+        c.drawBitmap(bmp, src, dst, bitmapPaint);
+        c.restore();
+    }
+
+    /**
+     * Round icon buttons instead of text pills: the footer then costs one thin
+     * row, which the larger poster grid gets to use. The glyphs are drawn, not
+     * font characters, so they stay crisp at any size.
+     */
     private void drawBrowserButton(Canvas c, HudSpec.Target t, GazeController.Readout g,
                                    float alpha) {
         float yaw = t.yaw - g.relYaw;
@@ -1135,28 +1398,53 @@ final class HudView extends View {
         }
         boolean focused = g.focus == t;
         angularRect(yaw, pitch, t.barW, t.barH, rect);
-        tint(fillPaint, focused ? 0x26FFB454 : 0x14FFFFFF, (int) (alpha * 255));
-        c.drawRoundRect(rect, 8f, 8f, fillPaint);
+        float cx = rect.centerX();
+        float cy = rect.centerY();
+        float r = Math.min(rect.width(), rect.height()) * 0.5f;
+        tint(fillPaint, focused ? 0x2BFFB454 : 0x14FFFFFF, (int) (alpha * 255));
+        c.drawCircle(cx, cy, r, fillPaint);
         tint(strokePaint, focused ? HudSpec.C_AMBER : 0x2EFFFFFF,
                 (int) (alpha * (focused ? 255 : 215)));
         strokePaint.setStyle(Paint.Style.STROKE);
-        strokePaint.setStrokeWidth(focused ? 2f : 1f);
-        c.drawRoundRect(rect, 8f, 8f, strokePaint);
+        strokePaint.setStrokeWidth(focused ? 1.9f : 1f);
+        c.drawCircle(cx, cy, r, strokePaint);
 
-        String label = t.text != null && t.text.length() > 0 ? t.text : t.id.label();
-        textPaint.setTypeface(medium);
-        textPaint.setTextSize(fontPx(1.25f));
-        tint(textPaint, focused ? HudSpec.C_AMBER : HudSpec.C_TEXT2, (int) (alpha * 250));
-        textPaint.setTextAlign(Paint.Align.CENTER);
-        c.drawText(label, rect.centerX(),
-                rect.centerY() + textPaint.getTextSize() * 0.36f, textPaint);
+        tint(strokePaint, focused ? HudSpec.C_AMBER : HudSpec.C_TEXT2, (int) (alpha * 250));
+        strokePaint.setStrokeWidth(Math.max(1.6f, r * 0.16f));
+        path.reset();
+        float s = r * 0.40f;
+        if (t.id == HudSpec.Id.BROWSER_PREV) {
+            path.moveTo(cx + s * 0.45f, cy - s);
+            path.lineTo(cx - s * 0.55f, cy);
+            path.lineTo(cx + s * 0.45f, cy + s);
+            c.drawPath(path, strokePaint);
+        } else if (t.id == HudSpec.Id.BROWSER_NEXT) {
+            path.moveTo(cx - s * 0.45f, cy - s);
+            path.lineTo(cx + s * 0.55f, cy);
+            path.lineTo(cx - s * 0.45f, cy + s);
+            c.drawPath(path, strokePaint);
+        } else if (t.id == HudSpec.Id.BROWSER_CLOSE) {
+            path.moveTo(cx - s, cy - s);
+            path.lineTo(cx + s, cy + s);
+            path.moveTo(cx + s, cy - s);
+            path.lineTo(cx - s, cy + s);
+            c.drawPath(path, strokePaint);
+        } else {
+            // Projection: a globe, i.e. the sphere the frame is wrapped onto.
+            c.drawCircle(cx, cy, s, strokePaint);
+            c.drawOval(cx - s * 0.42f, cy - s, cx + s * 0.42f, cy + s, strokePaint);
+            path.moveTo(cx - s, cy);
+            path.lineTo(cx + s, cy);
+            c.drawPath(path, strokePaint);
+        }
 
         if (focused && g.charging) {
-            float h = Math.max(2f, rect.height() * 0.07f);
-            tint(fillPaint, HudSpec.C_AMBER, (int) (alpha * 245));
-            c.drawRect(rect.left + 8f, rect.bottom - h - 3f,
-                    rect.left + 8f + (rect.width() - 16f) * g.progress,
-                    rect.bottom - 3f, fillPaint);
+            tint(arcPaint, HudSpec.C_AMBER, (int) (alpha * 245));
+            arcPaint.setStyle(Paint.Style.STROKE);
+            arcPaint.setStrokeWidth(Math.max(2f, r * 0.14f));
+            arcPaint.setStrokeCap(Paint.Cap.ROUND);
+            c.drawArc(cx - r, cy - r, cx + r, cy + r, -90f,
+                    360f * g.progress, false, arcPaint);
         }
     }
 
@@ -1289,6 +1577,12 @@ final class HudView extends View {
                 return "服";
             case MENU_SUB_STYLE:
                 return "字";
+            case MENU_PROJ:
+                return "投";
+            case PROJ_OPTION:
+                return "◎";
+            case MENU_PACK:
+                return "立";
             case MENU_EXIT:
             default:
                 return "退";
@@ -1314,13 +1608,17 @@ final class HudView extends View {
             case MENU_MORE:
                 return "下一页";
             case MENU_BACK:
-                return "上一页";
+                return f.menuPage == 0 ? "关闭" : "上一页";
             case MENU_VOLUME:
                 return f.volumeText;
             case MENU_SERVER:
                 return f.serverText;
             case MENU_SUB_STYLE:
                 return f.subStyleText;
+            case MENU_PROJ:
+                return f.projText;
+            case MENU_PACK:
+                return f.packText;
             case MENU_EXIT:
             default:
                 return "2.5s+确认";
@@ -1346,13 +1644,17 @@ final class HudView extends View {
             case MENU_MORE:
                 return "音量 / 服务器 / 字幕样式 / 文件 / 退出";
             case MENU_BACK:
-                return "回到常用设置";
+                return frame.menuPage == 0 ? "关闭设置，回到画面" : "回到常用设置";
             case MENU_VOLUME:
                 return "媒体音量 · 25% 一档循环";
             case MENU_SERVER:
                 return frame.serverText == null ? "服务器列表" : "下个片库使用所选服务器";
             case MENU_SUB_STYLE:
                 return "字号与描边预设 · 记住选择";
+            case MENU_PROJ:
+                return "平面 / 360° / 180° / 鱼眼 · 注视切换";
+            case MENU_PACK:
+                return "单眼 / 左右 / 上下";
             case MENU_EXIT:
             default:
                 return "回片库 · 保留进度，5 s 内可撤销";
@@ -1368,37 +1670,48 @@ final class HudView extends View {
     }
 
     /**
-     * Pinned to the bottom of the eye instead of a world anchor: the gesture it
-     * explains is a head-relative downward glance, so the hint has to be
-     * findable no matter where the head was last pointing.
+     * At rest the picture stays clean: nothing is drawn in the middle of the
+     * view any more. A slim cue appears at the very top/bottom edge only while
+     * a wake glance is being held, and the two edges are named once, briefly,
+     * right after the controls first tuck away.
      */
     private void drawWakeHint(Canvas c, float alpha) {
-        float cy = sy(-36f);
-        float halfWidth = 16f * pxPerDeg;
-        float halfHeight = 1.9f * pxPerDeg;
+        float progress = Math.min(1f, Math.max(0f, frame.wakeProgress));
+        if (progress > 0.001f) {
+            drawWakeBar(c, frame.wakeUp ? 44f : -44f, frame.wakeUp, progress, alpha, false);
+        } else if (frameNow < frame.wakeHintUntil) {
+            drawWakeBar(c, 44f, true, 0f, alpha * 0.8f, true);
+            drawWakeBar(c, -44f, false, 0f, alpha * 0.8f, true);
+        }
+    }
+
+    private void drawWakeBar(Canvas c, float pitchDeg, boolean top, float progress,
+                             float alpha, boolean lesson) {
+        float cy = sy(pitchDeg);
+        if (lesson) {
+            textPaint.setTypeface(regular);
+            textPaint.setTextSize(fontPx(1f));
+            tint(textPaint, 0xC9FFFFFF, (int) (alpha * 255));
+            textPaint.setTextAlign(Paint.Align.CENTER);
+            c.drawText(top ? "抬头或双击背面唤回" : "低头或双击背面唤回",
+                    eyeCx, cy + textPaint.getTextSize() * 0.34f, textPaint);
+            return;
+        }
+        float halfWidth = 12f * pxPerDeg;
+        float halfHeight = 1.5f * pxPerDeg;
         rect.set(eyeCx - halfWidth, cy - halfHeight, eyeCx + halfWidth, cy + halfHeight);
+        float radius = rect.height() * 0.5f;
         tint(fillPaint, 0x1FFFFFFF, (int) (alpha * 255));
-        c.drawRoundRect(rect, rect.height() * 0.5f, rect.height() * 0.5f, fillPaint);
-        tint(strokePaint, 0x47FFFFFF, (int) (alpha * 160));
+        c.drawRoundRect(rect, radius, radius, fillPaint);
+        tint(strokePaint, 0x8CFFB454, (int) (alpha * 190));
         strokePaint.setStrokeWidth(1f);
         strokePaint.setStyle(Paint.Style.STROKE);
-        c.drawRoundRect(rect, rect.height() * 0.5f, rect.height() * 0.5f, strokePaint);
-
-        float progress = Math.min(1f, Math.max(0f, frame.wakeProgress));
-        if (progress > 0f) {
-            RectF inner = rect2;
-            inner.set(rect.left + 2f, rect.bottom - 3f,
-                    rect.left + 2f + (rect.width() - 4f) * progress, rect.bottom - 1f);
-            tint(fillPaint, 0xD9FFB454, (int) (alpha * 255));
-            c.drawRoundRect(inner, 1f, 1f, fillPaint);
-        }
-
-        textPaint.setTypeface(regular);
-        textPaint.setTextSize(fontPx(1.05f));
-        tint(textPaint, 0x66FFFFFF, (int) (alpha * 190));
-        textPaint.setTextAlign(Paint.Align.CENTER);
-        c.drawText(progress > 0f ? "保持低头 · 唤回控件" : "低头看下方唤回控件",
-                rect.centerX(), rect.centerY() + textPaint.getTextSize() * 0.34f, textPaint);
+        c.drawRoundRect(rect, radius, radius, strokePaint);
+        RectF inner = rect2;
+        inner.set(rect.left + 2f, rect.bottom - 3f,
+                rect.left + 2f + (rect.width() - 4f) * progress, rect.bottom - 1.2f);
+        tint(fillPaint, 0xD9FFB454, (int) (alpha * 255));
+        c.drawRoundRect(inner, 1f, 1f, fillPaint);
     }
 
     private void drawMicroProgress(Canvas c, float alpha) {
@@ -1432,6 +1745,12 @@ final class HudView extends View {
                 return frame.subtitleOn ? "关闭字幕" : "开启字幕";
             case RECENTER:
                 return "视角回中";
+            case FILES:
+                return "打开文件管理";
+            case PROJ:
+                return "打开画面类型";
+            case PROJ_OPTION:
+                return t.text != null ? "选择 " + t.text : "选择画面类型";
             case MENU_AUDIO:
                 return "切换音轨";
             case MENU_SPEED:
@@ -1445,13 +1764,17 @@ final class HudView extends View {
             case MENU_MORE:
                 return "打开第二页设置";
             case MENU_BACK:
-                return "回到第一页";
+                return frame.menuPage == 0 ? "关闭菜单" : "回到第一页";
             case MENU_VOLUME:
                 return "调整音量";
             case MENU_SERVER:
                 return "切换服务器";
             case MENU_SUB_STYLE:
                 return "切换字幕样式";
+            case MENU_PROJ:
+                return "切换投影方式";
+            case MENU_PACK:
+                return "切换立体排布";
             case MENU_EXIT:
                 return "退出播放";
             case EXIT_CANCEL:
