@@ -121,7 +121,12 @@ public class LibraryActivity extends Activity {
                         | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
         settings = SmbSettings.load(this);
         dir = SmbFavorites.normalize(settings.path);
-        setContentView(buildRoot());
+        FrameLayout shell = new FrameLayout(this);
+        shell.setBackgroundColor(C_BG);
+        shell.addView(buildRoot(), new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        setContentView(shell);
+        DisplayModes.fitToCutout(this, shell);
 
         if (!settings.isConfigured()) {
             showScreen(SCREEN_SERVER);
@@ -558,7 +563,7 @@ public class LibraryActivity extends Activity {
         row.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                play(settings.url(entry.path), projectionMode());
+                play(settings.url(entry.path), null);
             }
         });
 
@@ -840,7 +845,7 @@ public class LibraryActivity extends Activity {
             row.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    play(settings.url(e.path), projectionMode());
+                    play(settings.url(e.path), null);
                 }
             });
             filesBody.addView(row, blockLp(dp(6)));
@@ -1237,7 +1242,7 @@ public class LibraryActivity extends Activity {
         mode.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                settings.projection = "360".equals(settings.projection) ? "sbs" : "360";
+                settings.projection = ProjectionMode.cycleKey(settings.projection);
                 settings.save(LibraryActivity.this);
                 mode.setText(projectionModeText());
             }
@@ -1355,7 +1360,11 @@ public class LibraryActivity extends Activity {
         long position = PlayHistory.positionFor(this, source);
         Intent play = new Intent(this, PlayerActivity.class);
         play.putExtra(PlayerActivity.EXTRA_PATH, source);
-        play.putExtra(PlayerActivity.EXTRA_MODE, mode);
+        // No mode means "let the player work it out": the filename first, then
+        // the track shape, then the library's default as the last resort.
+        if (mode != null && mode.length() > 0 && !"auto".equals(mode)) {
+            play.putExtra(PlayerActivity.EXTRA_MODE, mode);
+        }
         play.putExtra(PlayerActivity.EXTRA_SENSOR, true);
         if (position > 0) {
             play.putExtra(PlayerActivity.EXTRA_POSITION, position);
@@ -1414,11 +1423,12 @@ public class LibraryActivity extends Activity {
     // ------------------------------------------------------------- helpers
 
     private String projectionMode() {
-        return "360".equals(settings.projection) ? "360" : "sbs";
+        return settings.projection;
     }
 
     private String projectionModeText() {
-        return "360".equals(settings.projection) ? "360° 全景" : "SBS 3D 立体";
+        ProjectionMode p = ProjectionMode.parse(settings.projection);
+        return p == null ? "自动识别" : p.label();
     }
 
     private String metaOf(SmbConnection.Entry e) {
@@ -1439,10 +1449,12 @@ public class LibraryActivity extends Activity {
         if (is4k(name)) {
             tags.add("4K");
         }
-        if (is3d(name)) {
-            tags.add("SBS 3D");
-        } else if (is360(name)) {
-            tags.add("360°");
+        ProjectionMode pm = ProjectionMode.detect(name, 0, 0, null);
+        if (pm.proj != ProjectionMode.FLAT) {
+            tags.add(pm.projLabel()
+                    + (pm.pack == ProjectionMode.MONO ? "" : " " + pm.packLabel()));
+        } else if (pm.pack != ProjectionMode.MONO) {
+            tags.add(pm.pack == ProjectionMode.SBS ? "SBS 3D" : "上下 3D");
         }
         if (name.toLowerCase(Locale.US).contains("hevc")
                 || name.toLowerCase(Locale.US).contains("h265")) {
@@ -1462,13 +1474,12 @@ public class LibraryActivity extends Activity {
         if (is4k(name)) {
             return "4K";
         }
-        if (is3d(name)) {
-            return "3D";
+        ProjectionMode pm = ProjectionMode.detect(name, 0, 0, null);
+        if (pm.proj != ProjectionMode.FLAT) {
+            return pm.proj == ProjectionMode.EQ360 ? "360"
+                    : (pm.proj == ProjectionMode.EQ180 ? "180" : "鱼眼");
         }
-        if (is360(name)) {
-            return "360";
-        }
-        return "2D";
+        return pm.pack == ProjectionMode.MONO ? "2D" : "3D";
     }
 
     private static boolean is4k(String name) {

@@ -7,6 +7,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
 
 /**
  * Phone-side shell. The file list lives in {@link LibraryActivity}; the big
@@ -74,12 +75,29 @@ public class MainActivity extends Activity {
                         REQ_CALIB);
             }
         });
-        setContentView(stage);
+        stage.setOnFlipImageListener(new StageView.OnFlipImageListener() {
+            @Override
+            public void onFlipImage() {
+                boolean on = !getSharedPreferences("gazeline_display", MODE_PRIVATE)
+                        .getBoolean("flip", false);
+                getSharedPreferences("gazeline_display", MODE_PRIVATE).edit()
+                        .putBoolean("flip", on).apply();
+                android.widget.Toast.makeText(MainActivity.this,
+                        on ? "画面已翻转 180°（下次播放生效）" : "画面已恢复正常",
+                        android.widget.Toast.LENGTH_SHORT).show();
+            }
+        });
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(0xFF05070A);
+        root.addView(stage, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        setContentView(root);
+        DisplayModes.fitToCutout(this, root);
 
         new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
             @Override
             public void run() {
-                stage.showHud();
+                stage.showHome();
             }
         }, 1700);
     }

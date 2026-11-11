@@ -21,9 +21,11 @@ import android.view.View;
 public class StageView extends View {
 
     public static final int SCR_SPLASH = 0;
-    public static final int SCR_HUD = 1;
-    public static final int SCR_CALIB = 2;
-    public static final int SCR_ABOUT = 3;
+    public static final int SCR_HOME = 1;
+    /** Static HUD demo; reached from Settings only. */
+    public static final int SCR_HUD = 2;
+    public static final int SCR_CALIB = 3;
+    public static final int SCR_SETTINGS = 4;
 
     private static final float FOV = 90f;
 
@@ -77,16 +79,25 @@ public class StageView extends View {
     private final Path clipPath = new Path();
     private final RectF eye = new RectF();
     private final RectF chrome = new RectF();
-    private final RectF[] zones = {new RectF(), new RectF(), new RectF(), new RectF()};
+    /** Hit boxes of the bottom bar, recomputed by every draw. */
+    private final java.util.List<RectF> barZones = new java.util.ArrayList<>();
     private final RectF wakeZone = new RectF();
     private final RectF undoZone = new RectF();
-    private final RectF openZone = new RectF();
-    private final RectF vrZone = new RectF();
     private final RectF startZone = new RectF();
+    // home: the resume card is the only focus, the two bottom buttons are the
+    // only primary entries, the gear hides everything low-frequency.
+    private final RectF homeGear = new RectF();
+    private final RectF homeCard = new RectF();
+    /** Home column bounds: full width in portrait, a centred column in landscape. */
+    private float homeLeft;
+    private float homeRight;
+    private final RectF homeLibrary = new RectF();
+    private final RectF homeVr = new RectF();
+    private final RectF homeAllZone = new RectF();
+    private final RectF settingsBack = new RectF();
+    private final RectF[] settingsRows = {new RectF(), new RectF(), new RectF()};
     private final java.util.List<RectF> historyZones = new java.util.ArrayList<>();
     private final java.util.List<PlayHistory.Entry> history = new java.util.ArrayList<>();
-    /** Bottom of the HUD spec block; the resume list starts below it. */
-    private float chromeBottom;
     private final RectF ipdTrack = new RectF();
     private final RectF[] modelChips = {new RectF(), new RectF(), new RectF()};
     private final RectF[] screenChips = {new RectF(), new RectF(), new RectF()};
@@ -109,6 +120,16 @@ public class StageView extends View {
 
     interface OnStartCalibListener {
         void onStartCalib();
+    }
+
+    interface OnFlipImageListener {
+        void onFlipImage();
+    }
+
+    private OnFlipImageListener flipImageListener;
+
+    public void setOnFlipImageListener(OnFlipImageListener l) {
+        flipImageListener = l;
     }
 
     private OnStartCalibListener startCalibListener;
@@ -166,19 +187,34 @@ public class StageView extends View {
         setFocusable(true);
     }
 
+    public void showHome() {
+        screen = SCR_HOME;
+        invalidate();
+    }
+
     public void showHud() {
         screen = SCR_HUD;
         invalidate();
     }
 
+    public void showSettings() {
+        screen = SCR_SETTINGS;
+        invalidate();
+    }
+
     public boolean back() {
-        if (screen == SCR_CALIB || screen == SCR_ABOUT) {
-            screen = SCR_HUD;
+        if (screen == SCR_HUD || screen == SCR_CALIB) {
+            screen = SCR_SETTINGS;
+            invalidate();
+            return true;
+        }
+        if (screen == SCR_SETTINGS) {
+            screen = SCR_HOME;
             invalidate();
             return true;
         }
         if (screen == SCR_SPLASH) {
-            showHud();
+            showHome();
             return true;
         }
         return false;
@@ -216,34 +252,42 @@ public class StageView extends View {
         ppd = side / FOV;
         cx = eye.centerX();
         cy = eye.centerY();
-
-        float cell = chrome.width() / 4f;
-        for (int i = 0; i < 4; i++) {
-            zones[i].set(chrome.left + i * cell, chrome.top, chrome.left + (i + 1) * cell, chrome.bottom);
-        }
         wakeZone.set(X(-12.5f), Y(-40.5f), X(12.5f), Y(-37.5f));
 
+        // Home: one resume card, then the list, then the two primary entries.
+        // The gear sits in the header and never moves. Landscape keeps the same
+        // single column but centred, so the page no longer hugs the left edge.
+        float m = 20 * dp;
         if (landscape) {
-            float btnH = 52 * dp;
-            float gap = 10 * dp;
-            float pLeft = panel.left;
-            float pRight = panel.right;
-            float vrW = (pRight - pLeft - gap) * 0.32f;
-            float btnTop = Math.min(panel.top + 108 * dp, panel.bottom - 40 * dp - btnH);
-            openZone.set(pLeft, btnTop, pRight - gap - vrW, btnTop + btnH);
-            vrZone.set(openZone.right + gap, btnTop, pRight, btnTop + btnH);
-            undoZone.set(pLeft, panel.bottom - 42 * dp, pRight, panel.bottom);
-            chromeBottom = openZone.bottom;
+            float colW = Math.min(W - 2 * m, 640 * dp);
+            homeLeft = (W - colW) / 2f;
+            homeRight = homeLeft + colW;
         } else {
-            float btnH = 54 * dp;
-            float btnBottom = chrome.top - 16 * dp;
-            float gap = 10 * dp;
-            float left = 24 * dp;
-            float right = W - 24 * dp;
-            float vrW = (right - left - gap) * 0.34f;
-            openZone.set(left, btnBottom - btnH, right - gap - vrW, btnBottom);
-            vrZone.set(openZone.right + gap, btnBottom - btnH, right, btnBottom);
+            homeLeft = m;
+            homeRight = W - m;
         }
+        homeGear.set(homeRight - 46 * dp, 8 * dp, homeRight, 54 * dp);
+        settingsBack.set(m - 6 * dp, 4 * dp, m + 62 * dp, 56 * dp);
+
+        float actionsH = landscape ? 50 * dp : 56 * dp;
+        float actionsBottom = H - (landscape ? 16 : 22) * dp;
+        float actionsTop = actionsBottom - actionsH;
+
+        if (landscape) {
+            homeCard.set(homeLeft, 60 * dp, homeRight, 60 * dp + 136 * dp);
+            float gap = 10 * dp;
+            float vrW = (homeRight - homeLeft - gap) * 0.34f;
+            homeLibrary.set(homeLeft, actionsTop, homeRight - gap - vrW, actionsBottom);
+            homeVr.set(homeLibrary.right + gap, actionsTop, homeRight, actionsBottom);
+        } else {
+            float cardH = Math.min(188 * dp, H * 0.28f);
+            homeCard.set(m, 70 * dp, W - m, 70 * dp + cardH);
+            float gap = 10 * dp;
+            float vrW = (W - 2 * m - gap) * 0.34f;
+            homeLibrary.set(m, actionsTop, W - m - gap - vrW, actionsBottom);
+            homeVr.set(homeLibrary.right + gap, actionsTop, W - m, actionsBottom);
+        }
+        homeAllZone.setEmpty();
     }
 
     private float X(float yaw) {
@@ -259,10 +303,12 @@ public class StageView extends View {
         c.drawColor(0xFF05070A);
         if (screen == SCR_SPLASH) {
             drawSplash(c);
+        } else if (screen == SCR_HOME) {
+            drawHomeScreen(c);
         } else if (screen == SCR_HUD) {
             drawHudScreen(c);
-        } else if (screen == SCR_ABOUT) {
-            drawAboutScreen(c);
+        } else if (screen == SCR_SETTINGS) {
+            drawSettingsScreen(c);
         } else {
             drawCalibScreen(c);
         }
@@ -388,84 +434,136 @@ public class StageView extends View {
         txt(c, "GAZELINE", eye.left + 14 * dp, eye.top + 22 * dp, 9.5f * dp, 0x66C7D4E8, tfMed, Paint.Align.LEFT);
 
         drawHudChrome(c);
-        drawHistory(c);
-        drawOpenEntry(c);
-        drawBar(c, new String[]{"HUD 预览", "S5 校准",
-                hudVisible ? "收起 HUD" : "叫回 HUD", "关于"}, 0);
+        drawBar(c, new String[]{hudVisible ? "收起 HUD" : "叫回 HUD", "返回设置"}, -1);
+    }
+
+    // ---------------------------------------------------------------- home
+
+    private void drawHomeScreen(Canvas c) {
+        p.setShader(new LinearGradient(0, 0, 0, H,
+                new int[]{0xFF0B1220, 0xFF05070A}, null, Shader.TileMode.CLAMP));
+        c.drawRect(0, 0, W, H, p);
+        p.setShader(null);
+
+        tp.setLetterSpacing(0.16f);
+        txt(c, "GAZELINE", homeLeft, 32 * dp, 15 * dp, 0xFFF4F8FF, tfLight, Paint.Align.LEFT);
+        tp.setLetterSpacing(0f);
+        txt(c, versionText(), homeLeft, 48 * dp, 9.5f * dp, 0xFF6F8099, tfReg, Paint.Align.LEFT);
+
+        drawGear(c);
+        drawHomeCard(c);
+        if (!history.isEmpty()) {
+            drawHomeHistory(c);
+        }
+        drawHomeActions(c);
         if (undoPath != null) {
             drawUndo(c);
         }
     }
 
-    private void drawOpenEntry(Canvas c) {
-        String hint = landscape
-                ? "左侧为静态 HUD 预览 · 预览内可直接点播放键"
-                : "上方为静态 HUD 预览 · 真实播放从下方进入";
-        txt(c, hint, openZone.left + 2 * dp,
-                openZone.top - (landscape ? 14 : 12) * dp, 10.2f * dp, 0xFF7A879E, tfReg,
-                Paint.Align.LEFT);
-
+    private void drawGear(Canvas c) {
+        float gx = homeGear.centerX();
+        float gy = homeGear.centerY();
+        float r = 8.2f * dp;
+        p.setColor(0x14FFFFFF);
+        c.drawCircle(gx, gy, 19 * dp, p);
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeCap(Paint.Cap.ROUND);
+        p.setColor(0xFFA7B2C7);
+        // Teeth: eight short thick spokes on the rim, not rays off a disc.
+        p.setStrokeWidth(3.4f * dp);
+        for (int i = 0; i < 8; i++) {
+            double a = Math.PI * i / 4.0 + Math.PI / 8.0;
+            float in = r * 0.72f;
+            float out = r * 1.02f;
+            c.drawLine(gx + (float) Math.cos(a) * in,
+                    gy + (float) Math.sin(a) * in,
+                    gx + (float) Math.cos(a) * out,
+                    gy + (float) Math.sin(a) * out, p);
+        }
+        // Body ring and the hole in the middle: reads as a cog, not a sun.
+        p.setStrokeWidth(2.4f * dp);
+        c.drawCircle(gx, gy, r * 0.62f, p);
+        p.setStrokeWidth(2f * dp);
+        c.drawCircle(gx, gy, r * 0.26f, p);
+        p.setStrokeCap(Paint.Cap.BUTT);
         p.setStyle(Paint.Style.FILL);
-        p.setAlpha(255);
-        p.setShader(new LinearGradient(openZone.left, openZone.top, openZone.right, openZone.bottom,
+    }
+
+    /** The one focal card: resume the newest film, or start with the library. */
+    private void drawHomeCard(Canvas c) {
+        cardBox(c, homeCard);
+        float left = homeCard.left + 18 * dp;
+        float right = homeCard.right - 18 * dp;
+        boolean has = !history.isEmpty();
+
+        txt(c, has ? "继续观看" : "开始观看", left, homeCard.top + 26 * dp,
+                11.5f * dp, 0xFF93A2BA, tfMed, Paint.Align.LEFT);
+
+        if (has) {
+            PlayHistory.Entry e = history.get(0);
+            String name = e.name == null || e.name.length() == 0 ? e.source : e.name;
+            txt(c, fitText(name, right - left, 16 * dp, tfMed), left,
+                    homeCard.top + 56 * dp, 16 * dp, 0xFFE9EEF9, tfMed, Paint.Align.LEFT);
+            txt(c, modeText(e) + " · " + posText(e), left, homeCard.top + 78 * dp,
+                    10.5f * dp, 0xFF9AA8BE, tfReg, Paint.Align.LEFT);
+            float progress = e.durationMs > 0
+                    ? Math.min(1f, Math.max(0f, (float) e.positionMs / e.durationMs)) : 0f;
+            float barY = homeCard.top + 100 * dp;
+            p.setColor(0x22FFFFFF);
+            c.drawRect(left, barY, right, barY + 3 * dp, p);
+            p.setColor(0xCCFFB454);
+            c.drawRect(left, barY, left + (right - left) * progress, barY + 3 * dp, p);
+        } else {
+            txt(c, "还没有观看记录", left, homeCard.top + 56 * dp, 16 * dp,
+                    0xFFE9EEF9, tfMed, Paint.Align.LEFT);
+            txt(c, "从片库或局域网共享选一个视频", left, homeCard.top + 78 * dp,
+                    10.5f * dp, 0xFF9AA8BE, tfReg, Paint.Align.LEFT);
+        }
+
+        RectF btn = new RectF(left, homeCard.bottom - 58 * dp, right, homeCard.bottom - 16 * dp);
+        p.setShader(new LinearGradient(btn.left, btn.top, btn.right, btn.bottom,
                 0xFFFFC46B, 0xFFF0A33C, Shader.TileMode.CLAMP));
-        c.drawRoundRect(openZone, openZone.height() / 2f, openZone.height() / 2f, p);
+        c.drawRoundRect(btn, btn.height() / 2f, btn.height() / 2f, p);
         p.setShader(null);
 
-        float cy2 = openZone.centerY();
-        float tx = openZone.left + 22 * dp;
+        float tx = btn.left + 20 * dp;
+        float cy2 = btn.centerY();
         Path tri = new Path();
-        tri.moveTo(tx, cy2 - 8 * dp);
-        tri.lineTo(tx + 14 * dp, cy2);
-        tri.lineTo(tx, cy2 + 8 * dp);
+        tri.moveTo(tx, cy2 - 6.5f * dp);
+        tri.lineTo(tx + 11 * dp, cy2);
+        tri.lineTo(tx, cy2 + 6.5f * dp);
         tri.close();
         p.setColor(0xFF1A1204);
         c.drawPath(tri, p);
-
-        txt(c, "片库", tx + 24 * dp, cy2 + 5.6f * dp, 15.5f * dp, 0xFF1A1204, tfMed, Paint.Align.LEFT);
-        txt(c, "本地 / SMB", openZone.right - 16 * dp, cy2 + 4.6f * dp, 10.5f * dp,
-                0xCC1A1204, tfReg, Paint.Align.RIGHT);
-
-        p.setColor(0x1AFFFFFF);
-        c.drawRoundRect(vrZone, vrZone.height() / 2f, vrZone.height() / 2f, p);
-        p.setStyle(Paint.Style.STROKE);
-        p.setStrokeWidth(1.2f * dp);
-        p.setColor(0x6667E8F9);
-        c.drawRoundRect(vrZone, vrZone.height() / 2f, vrZone.height() / 2f, p);
-        p.setStyle(Paint.Style.FILL);
-        txt(c, "进入 VR", vrZone.centerX(), vrZone.centerY() + 5f * dp, 14f * dp,
-                0xFF9FE9F7, tfMed, Paint.Align.CENTER);
-        txt(c, "头显片库", vrZone.centerX(), vrZone.centerY() + 18f * dp, 9.5f * dp,
-                0x8867E8F9, tfReg, Paint.Align.CENTER);
+        txt(c, has ? "继续播放" : "打开片库", tx + 20 * dp, cy2 + 5.2f * dp,
+                14 * dp, 0xFF1A1204, tfMed, Paint.Align.LEFT);
+        txt(c, has ? "从断点接着看" : "本地 / SMB", btn.right - 14 * dp, cy2 + 4.4f * dp,
+                9.5f * dp, 0xCC1A1204, tfReg, Paint.Align.RIGHT);
     }
 
-    /** Resume list: the last films with the position they stopped at. */
-    private void drawHistory(Canvas c) {
+    /** At most three rows; the list never competes with the card or the buttons. */
+    private void drawHomeHistory(Canvas c) {
         historyZones.clear();
-        if (history.isEmpty()) {
-            return;
+        float left = homeCard.left;
+        float right = homeCard.right;
+        float top = homeCard.bottom + 24 * dp;
+        float limit = homeLibrary.top - 12 * dp;
+        if (undoPath != null) {
+            limit = Math.min(limit, homeLibrary.top - 62 * dp);
         }
-        float x0 = landscape ? panel.left : 24 * dp;
-        float x1 = landscape ? panel.right : W - 24 * dp;
-        float y = landscape ? openZone.bottom + 14 * dp : chromeBottom + 22 * dp;
-        txt(c, "继续观看", x0 + 2 * dp, y, 12.5f * dp, 0xFF93A2BA, tfMed, Paint.Align.LEFT);
-        txt(c, "断点续播 · 应用与 VR 共用", x1, y, 10.2f * dp, 0xFF6F7A91, tfReg, Paint.Align.RIGHT);
-        y += 10 * dp;
+        txt(c, "最近播放", left, top, 12 * dp, 0xFF93A2BA, tfMed, Paint.Align.LEFT);
+        homeAllZone.set(right - 64 * dp, top - 16 * dp, right, top + 8 * dp);
+        txt(c, "全部 ›", right, top, 11 * dp, 0xFF7A8DA8, tfReg, Paint.Align.RIGHT);
 
-        boolean blocked = undoPath != null;
-        float limit;
-        if (landscape) {
-            limit = blocked ? undoZone.top - 6 * dp : panel.bottom;
-        } else {
-            limit = blocked ? openZone.top - 62 * dp : openZone.top - 6 * dp;
-        }
-        float rowH = landscape ? 38 * dp : 52 * dp;
+        float y = top + 12 * dp;
+        float rowH = landscape ? 42 * dp : 52 * dp;
         float gap = landscape ? 6 * dp : 8 * dp;
-        int max = (int) Math.min(3, (limit - y + gap) / (rowH + gap));
-        max = Math.max(0, Math.min(max, history.size()));
+        int max = (int) Math.min(3, Math.max(0, (limit - y + gap) / (rowH + gap)));
+        max = Math.min(max, history.size());
         for (int i = 0; i < max; i++) {
             PlayHistory.Entry e = history.get(i);
-            RectF r = new RectF(x0, y, x1, y + rowH);
+            RectF r = new RectF(left, y, right, y + rowH);
             historyZones.add(r);
             p.setColor(0xE60B1018);
             c.drawRoundRect(r, 14 * dp, 14 * dp, p);
@@ -476,27 +574,19 @@ public class StageView extends View {
             p.setStyle(Paint.Style.FILL);
 
             String name = e.name == null || e.name.length() == 0 ? e.source : e.name;
-            String mode = "sbs".equals(e.mode) ? "SBS" : "360°";
-            String pos = e.durationMs > 0
-                    ? timeText(e.positionMs) + " / " + timeText(e.durationMs)
-                    : timeText(e.positionMs);
-
             if (landscape) {
-                // One-line row: the panel is wide enough to keep name, meta and
-                // action on a single baseline.
-                txt(c, fit(name, r.width() - 250 * dp), r.left + 16 * dp,
+                txt(c, fitText(name, r.width() - 250 * dp, 13.5f * dp, tfMed), r.left + 16 * dp,
                         r.centerY() + 5 * dp, 13.5f * dp, 0xFFE9EEF9, tfMed, Paint.Align.LEFT);
-                txt(c, mode + " · " + pos, r.right - 62 * dp, r.centerY() + 4 * dp,
-                        10.2f * dp, 0xFF9AA8BE, tfReg, Paint.Align.RIGHT);
-                txt(c, "继续", r.right - 16 * dp, r.centerY() + 5 * dp, 12.5f * dp,
+                txt(c, modeText(e) + " · " + posText(e), r.right - 62 * dp,
+                        r.centerY() + 4 * dp, 10 * dp, 0xFF9AA8BE, tfReg, Paint.Align.RIGHT);
+                txt(c, "继续", r.right - 16 * dp, r.centerY() + 5 * dp, 12 * dp,
                         0xFFFFB454, tfMed, Paint.Align.RIGHT);
             } else {
-                float maxW = r.width() - 150 * dp;
-                txt(c, fit(name, maxW), r.left + 16 * dp, r.top + 21 * dp, 13.5f * dp,
-                        0xFFE9EEF9, tfMed, Paint.Align.LEFT);
-                txt(c, mode + " · " + pos, r.left + 16 * dp, r.top + 38 * dp, 10.5f * dp,
-                        0xFF9AA8BE, tfReg, Paint.Align.LEFT);
-                txt(c, "继续", r.right - 16 * dp, r.centerY() + 4.5f * dp, 12.5f * dp,
+                txt(c, fitText(name, r.width() - 150 * dp, 13.5f * dp, tfMed), r.left + 16 * dp,
+                        r.top + 21 * dp, 13.5f * dp, 0xFFE9EEF9, tfMed, Paint.Align.LEFT);
+                txt(c, modeText(e) + " · " + posText(e), r.left + 16 * dp,
+                        r.top + 37 * dp, 10 * dp, 0xFF9AA8BE, tfReg, Paint.Align.LEFT);
+                txt(c, "继续", r.right - 16 * dp, r.centerY() + 4.5f * dp, 12 * dp,
                         0xFFFFB454, tfMed, Paint.Align.RIGHT);
             }
 
@@ -510,6 +600,66 @@ public class StageView extends View {
                     r.left + 16 * dp + (r.width() - 32 * dp) * progress, barY + 2 * dp, p);
             y += rowH + gap;
         }
+    }
+
+    /** The only two primary entries: library is filled, headset entry is outlined. */
+    private void drawHomeActions(Canvas c) {
+        p.setStyle(Paint.Style.FILL);
+        p.setShader(new LinearGradient(homeLibrary.left, homeLibrary.top,
+                homeLibrary.right, homeLibrary.bottom, 0xFFFFC46B, 0xFFF0A33C, Shader.TileMode.CLAMP));
+        c.drawRoundRect(homeLibrary, homeLibrary.height() / 2f, homeLibrary.height() / 2f, p);
+        p.setShader(null);
+
+        float cy2 = homeLibrary.centerY();
+        float tx = homeLibrary.left + 20 * dp;
+        Path tri = new Path();
+        tri.moveTo(tx, cy2 - 7.5f * dp);
+        tri.lineTo(tx + 13 * dp, cy2);
+        tri.lineTo(tx, cy2 + 7.5f * dp);
+        tri.close();
+        p.setColor(0xFF1A1204);
+        c.drawPath(tri, p);
+        txt(c, "片库", tx + 22 * dp, cy2 + 5.4f * dp, 15 * dp, 0xFF1A1204, tfMed, Paint.Align.LEFT);
+        txt(c, "本地 / SMB", homeLibrary.right - 14 * dp, cy2 + 4.6f * dp,
+                9.8f * dp, 0xCC1A1204, tfReg, Paint.Align.RIGHT);
+
+        p.setColor(0x1AFFFFFF);
+        c.drawRoundRect(homeVr, homeVr.height() / 2f, homeVr.height() / 2f, p);
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(1.2f * dp);
+        p.setColor(0x6667E8F9);
+        c.drawRoundRect(homeVr, homeVr.height() / 2f, homeVr.height() / 2f, p);
+        p.setStyle(Paint.Style.FILL);
+        txt(c, "进入 VR", homeVr.centerX(), homeVr.centerY() - 1 * dp, 14 * dp,
+                0xFF9FE9F7, tfMed, Paint.Align.CENTER);
+        txt(c, "头显片库", homeVr.centerX(), homeVr.centerY() + 13 * dp, 9 * dp,
+                0x8867E8F9, tfReg, Paint.Align.CENTER);
+    }
+
+    private String modeText(PlayHistory.Entry e) {
+        return "sbs".equals(e.mode) ? "SBS" : "360°";
+    }
+
+    private String posText(PlayHistory.Entry e) {
+        return e.durationMs > 0
+                ? timeText(e.positionMs) + " / " + timeText(e.durationMs)
+                : timeText(e.positionMs);
+    }
+
+    private String fitText(String text, float maxWidth, float size, Typeface tf) {
+        if (text == null) {
+            return "";
+        }
+        tp.setTypeface(tf);
+        tp.setTextSize(size);
+        if (tp.measureText(text) <= maxWidth) {
+            return text;
+        }
+        int n = text.length();
+        while (n > 1 && tp.measureText(text.substring(0, n) + "…") > maxWidth) {
+            n--;
+        }
+        return text.substring(0, n) + "…";
     }
 
     private String fit(String text, float maxWidth) {
@@ -539,11 +689,8 @@ public class StageView extends View {
 
     private void drawUndo(Canvas c) {
         float h = 42 * dp;
-        if (landscape) {
-            undoZone.set(panel.left, panel.bottom - h, panel.right, panel.bottom);
-        } else {
-            undoZone.set(24 * dp, openZone.top - 10 * dp - h, W - 24 * dp, openZone.top - 10 * dp);
-        }
+        undoZone.set(homeLibrary.left, homeLibrary.top - 10 * dp - h,
+                homeLibrary.right, homeLibrary.top - 10 * dp);
         p.setStyle(Paint.Style.FILL);
         p.setColor(0xE60B1018);
         c.drawRoundRect(undoZone, h * 0.5f, h * 0.5f, p);
@@ -822,7 +969,6 @@ public class StageView extends View {
                 txt(c, lines[i], x, y, 9.6f * dp, 0xFF93A2BA, tfReg, Paint.Align.LEFT);
                 y += 13 * dp;
             }
-            chromeBottom = y;
             return;
         }
 
@@ -841,7 +987,6 @@ public class StageView extends View {
             txt(c, s, x, y, 10.2f * dp, 0xFF93A2BA, tfReg, Paint.Align.LEFT);
             y += 16 * dp;
         }
-        chromeBottom = y + 4 * dp;
     }
 
     // ---------------------------------------------------------------- S5 calibration
@@ -862,7 +1007,7 @@ public class StageView extends View {
         p.setStyle(Paint.Style.FILL);
 
         drawCalibForm(c);
-        drawBar(c, new String[]{"HUD 预览", "S5 校准", "恢复出厂", "关于"}, 1);
+        drawBar(c, new String[]{"返回设置", "恢复出厂"}, -1);
     }
 
     private void drawTestCard(Canvas c) {
@@ -1012,12 +1157,14 @@ public class StageView extends View {
         txt(c, "当前：k1 " + cp.k1Text() + " · k2 " + cp.k2Text() + " · 垂直 " + cp.vertText(),
                 x, y, 9.8f * dp, 0xFFB9C4DA, tfReg, Paint.Align.LEFT);
 
-        // Start button shares the HUD entry's footprint (portrait) or the
+        // Start button keeps the HUD entry's footprint (portrait) or the
         // bottom of the right column (landscape).
         if (landscape) {
             startZone.set(panel.left, panel.bottom - 52 * dp, panel.right, panel.bottom);
         } else {
-            startZone.set(openZone);
+            float btnH = 54 * dp;
+            float btnBottom = chrome.top - 16 * dp;
+            startZone.set(24 * dp, btnBottom - btnH, W - 24 * dp, btnBottom);
         }
         p.setStyle(Paint.Style.FILL);
         p.setAlpha(255);
@@ -1091,139 +1238,111 @@ public class StageView extends View {
         }
     }
 
-    // ---------------------------------------------------------------- about
+    // -------------------------------------------------------------- settings
 
-    private void drawAboutScreen(Canvas c) {
+    /**
+     * One page for everything that is not playback: HUD demo, calibration and
+     * the credits. The home screen never links here by accident.
+     */
+    private void drawSettingsScreen(Canvas c) {
         p.setStyle(Paint.Style.FILL);
         p.setShader(new LinearGradient(0, 0, 0, H,
                 new int[]{0xFF0B1220, 0xFF05070A}, null, Shader.TileMode.CLAMP));
         c.drawRect(0, 0, W, H, p);
         p.setShader(null);
 
+        txt(c, "‹ 返回", settingsBack.left + 4 * dp, 34 * dp, 13 * dp, 0xFFA7B2C7,
+                tfMed, Paint.Align.LEFT);
+        txt(c, "设置", W / 2f, 34 * dp, 16 * dp, 0xFFE9EEF9, tfMed, Paint.Align.CENTER);
+        txt(c, versionText(), W - 20 * dp, 34 * dp, 10 * dp, 0xFF6F8099, tfReg, Paint.Align.RIGHT);
+
+        String[] titles = {"HUD 预览", "S5 镜头校准", "画面翻转 180°"};
+        String[] subs = {"静态演示 VR 内控件，不影响播放", "调整画面畸变与两眼间距",
+                "播放时画面上下颠倒，点此翻转"};
+
         if (landscape) {
-            drawAboutLandscape(c);
-            return;
+            float m = 20 * dp;
+            float colW = Math.min(W - 2 * m, 820 * dp);
+            float left = (W - colW) / 2f;
+            float right = left + colW;
+            float rowsRight = left + colW * 0.52f;
+            float rowH = 56 * dp;
+            float gap = 10 * dp;
+            for (int i = 0; i < 3; i++) {
+                float top = 60 * dp + i * (rowH + gap);
+                settingsRows[i].set(left, top, rowsRight, top + rowH);
+                drawSettingsRow(c, settingsRows[i], titles[i], subs[i], rowH);
+            }
+            drawAboutCard(c, new RectF(rowsRight + 16 * dp, 60 * dp, right, H - 16 * dp), true);
+        } else {
+            float left = 20 * dp;
+            float right = W - 20 * dp;
+            float rowH = 66 * dp;
+            float gap = 10 * dp;
+            for (int i = 0; i < 3; i++) {
+                float top = 66 * dp + i * (rowH + gap);
+                settingsRows[i].set(left, top, right, top + rowH);
+                drawSettingsRow(c, settingsRows[i], titles[i], subs[i], rowH);
+            }
+            float aboutTop = 66 * dp + 3 * (rowH + gap) + 6 * dp;
+            float aboutBottom = Math.min(H - 20 * dp, aboutTop + 302 * dp);
+            drawAboutCard(c, new RectF(left, aboutTop, right, aboutBottom), false);
         }
-
-        tp.setLetterSpacing(0.18f);
-        txt(c, "GAZELINE", W / 2f, H * 0.10f, W * 0.062f, 0xFFF4F8FF, tfLight, Paint.Align.CENTER);
-        tp.setLetterSpacing(0.22f);
-        txt(c, "CARDBOARD VR PLAYER", W / 2f, H * 0.132f, 10.5f * dp, 0xFF8FA0BA, tfReg, Paint.Align.CENTER);
-        tp.setLetterSpacing(0f);
-        txt(c, versionText(), W / 2f, H * 0.165f, 12 * dp, 0xFF67E8F9, tfMed, Paint.Align.CENTER);
-
-        float cardTop = H * 0.205f;
-        // Card hugs the content instead of stretching to the bottom bar.
-        float contentDp = 30 + 26 + 3 * 22 + 34 + 22 + 5 * 19 + 32 + 22 + 18;
-        float cardBottom = cardTop + contentDp * dp;
-        p.setColor(0xCC0E131C);
-        c.drawRoundRect(24 * dp, cardTop, W - 24 * dp, cardBottom, 22 * dp, 22 * dp, p);
-        p.setStyle(Paint.Style.STROKE);
-        p.setStrokeWidth(1);
-        p.setColor(0x1FFFFFFF);
-        c.drawRoundRect(24 * dp, cardTop, W - 24 * dp, cardBottom, 22 * dp, 22 * dp, p);
-        p.setStyle(Paint.Style.FILL);
-
-        float left = 40 * dp;
-        float y = cardTop + 30 * dp;
-        txt(c, "ABOUT", left, y, 10 * dp, 0xFF7A8DA8, tfMed, Paint.Align.LEFT);
-        y += 26 * dp;
-        txt(c, "Android 手机 + Cardboard 卡纸盒的 VR 视频播放器", left, y, 12 * dp,
-                0xFFDDE6F3, tfReg, Paint.Align.LEFT);
-        y += 22 * dp;
-        txt(c, "360° 全景 / SBS 3D；播放与校准页内全部操作由凝视完成", left, y, 12 * dp,
-                0xFFDDE6F3, tfReg, Paint.Align.LEFT);
-        y += 22 * dp;
-        txt(c, "片源：本地存储 / SMB2-3 局域网共享（强制签名）", left, y, 12 * dp,
-                0xFFDDE6F3, tfReg, Paint.Align.LEFT);
-
-        y += 34 * dp;
-        txt(c, "开源组件", left, y, 10 * dp, 0xFF7A8DA8, tfMed, Paint.Align.LEFT);
-        y += 22 * dp;
-        txt(c, "smbj 0.15.0 · SMB2/3 客户端 · Apache-2.0", left, y, 11 * dp,
-                0xFFA7B2C7, tfReg, Paint.Align.LEFT);
-        y += 19 * dp;
-        txt(c, "asn-one 0.6.0 · ASN.1 · Apache-2.0", left, y, 11 * dp,
-                0xFFA7B2C7, tfReg, Paint.Align.LEFT);
-        y += 19 * dp;
-        txt(c, "mbassador 1.3.2 · 事件总线 · Apache-2.0", left, y, 11 * dp,
-                0xFFA7B2C7, tfReg, Paint.Align.LEFT);
-        y += 19 * dp;
-        txt(c, "Bouncy Castle 1.85.2 · NTLM 加密 · MIT-style", left, y, 11 * dp,
-                0xFFA7B2C7, tfReg, Paint.Align.LEFT);
-        y += 19 * dp;
-        txt(c, "slf4j-api 2.0.18 · 日志门面 · MIT", left, y, 11 * dp,
-                0xFFA7B2C7, tfReg, Paint.Align.LEFT);
-
-        y += 32 * dp;
-        txt(c, "第三方组件只用于局域网串流，不上传视频或账号。", left, y, 11 * dp,
-                0xFF9FB0C6, tfReg, Paint.Align.LEFT);
-        y += 22 * dp;
-        txt(c, buildLine(), left, y, 10.5f * dp, 0xFF6F8099, tfReg, Paint.Align.LEFT);
-
-        txt(c, "底部「返回」回到 HUD", W / 2f, cardBottom + 26 * dp, 10.5f * dp,
-                0xFF6F8099, tfReg, Paint.Align.CENTER);
-
-        drawBar(c, new String[]{"HUD 预览", "S5 校准", "返回", "关于"}, 3);
     }
 
-    /** Landscape about page: header on one line, two cards side by side. */
-    private void drawAboutLandscape(Canvas c) {
-        float m = 24 * dp;
-        float y = 22 * dp + 18 * dp;
-        tp.setLetterSpacing(0.18f);
-        txt(c, "GAZELINE", m, y, 20 * dp, 0xFFF4F8FF, tfLight, Paint.Align.LEFT);
-        tp.setLetterSpacing(0.22f);
-        txt(c, "CARDBOARD VR PLAYER", m + 150 * dp, y, 9.6f * dp, 0xFF8FA0BA, tfReg,
-                Paint.Align.LEFT);
-        tp.setLetterSpacing(0f);
-        txt(c, versionText(), W - m, y, 11 * dp, 0xFF67E8F9, tfMed, Paint.Align.RIGHT);
+    private void drawSettingsRow(Canvas c, RectF r, String title, String sub, float rowH) {
+        cardBox(c, r);
+        txt(c, title, r.left + 18 * dp, r.top + 26 * dp, 14 * dp, 0xFFE9EEF9,
+                tfMed, Paint.Align.LEFT);
+        txt(c, sub, r.left + 18 * dp, r.top + 46 * dp, 10 * dp, 0xFF93A2BA,
+                tfReg, Paint.Align.LEFT);
+        txt(c, "›", r.right - 18 * dp, r.top + rowH / 2f + 6 * dp, 18 * dp,
+                0xFF7A8DA8, tfReg, Paint.Align.RIGHT);
+    }
 
-        float cardTop = y + 16 * dp;
-        float cardBottom = chrome.top - 14 * dp;
-        float mid = W / 2f;
-        RectF left = new RectF(m, cardTop, mid - 8 * dp, cardBottom);
-        RectF right = new RectF(mid + 8 * dp, cardTop, W - m, cardBottom);
-        cardBox(c, left);
-        cardBox(c, right);
+    private void drawAboutCard(Canvas c, RectF box, boolean compact) {
+        cardBox(c, box);
+        float x = box.left + 16 * dp;
+        float y = box.top + (compact ? 22 : 26) * dp;
+        float step = compact ? 16 * dp : 21 * dp;
+        float body = compact ? 10.5f * dp : 11.5f * dp;
+        float maxW = box.width() - 30 * dp;
 
-        float x = left.left + 18 * dp;
-        float ly = left.top + 26 * dp;
-        txt(c, "ABOUT", x, ly, 9.8f * dp, 0xFF7A8DA8, tfMed, Paint.Align.LEFT);
-        ly += 22 * dp;
-        txt(c, "Android 手机 + Cardboard 卡纸盒的 VR 视频播放器", x, ly, 11 * dp,
-                0xFFDDE6F3, tfReg, Paint.Align.LEFT);
-        ly += 19 * dp;
-        txt(c, "360° 全景 / SBS 3D；播放与校准页内全部操作由凝视完成", x, ly, 11 * dp,
-                0xFFDDE6F3, tfReg, Paint.Align.LEFT);
-        ly += 19 * dp;
-        txt(c, "片源：本地存储 / SMB2-3 局域网共享（强制签名）", x, ly, 11 * dp,
-                0xFFDDE6F3, tfReg, Paint.Align.LEFT);
-        ly += 26 * dp;
-        txt(c, "第三方组件只用于局域网串流，不上传视频或账号。", x, ly, 10.5f * dp,
-                0xFF9FB0C6, tfReg, Paint.Align.LEFT);
-        ly += 18 * dp;
-        txt(c, buildLine(), x, ly, 10 * dp, 0xFF6F8099, tfReg, Paint.Align.LEFT);
+        txt(c, "关于", x, y, 9.8f * dp, 0xFF7A8DA8, tfMed, Paint.Align.LEFT);
+        y += compact ? 20 * dp : 26 * dp;
+        txt(c, fitText("Android 手机 + Cardboard 卡纸盒的 VR 视频播放器", maxW, body, tfReg),
+                x, y, body, 0xFFDDE6F3, tfReg, Paint.Align.LEFT);
+        y += step;
+        txt(c, fitText("360°/180° 全景 · SBS/上下 3D · 鱼眼", maxW, body, tfReg),
+                x, y, body, 0xFFDDE6F3, tfReg, Paint.Align.LEFT);
+        y += step;
+        txt(c, fitText("片源：本地存储 / SMB2-3 局域网共享", maxW, body, tfReg),
+                x, y, body, 0xFFDDE6F3, tfReg, Paint.Align.LEFT);
 
-        float rx = right.left + 18 * dp;
-        float ry = right.top + 26 * dp;
-        txt(c, "开源组件", rx, ry, 9.8f * dp, 0xFF7A8DA8, tfMed, Paint.Align.LEFT);
-        ry += 20 * dp;
+        y += compact ? 22 * dp : 28 * dp;
+        txt(c, "开源组件", x, y, 9.5f * dp, 0xFF7A8DA8, tfMed, Paint.Align.LEFT);
+        y += compact ? 17 * dp : 20 * dp;
         String[] libs = {
-                "smbj 0.15.0 · SMB2/3 客户端 · Apache-2.0",
+                "smbj 0.15.0 · SMB2/3 · Apache-2.0",
                 "asn-one 0.6.0 · ASN.1 · Apache-2.0",
                 "mbassador 1.3.2 · 事件总线 · Apache-2.0",
-                "Bouncy Castle 1.85.2 · NTLM 加密 · MIT-style",
+                "Bouncy Castle 1.85.2 · NTLM · MIT-style",
                 "slf4j-api 2.0.18 · 日志门面 · MIT"
         };
+        float libSize = compact ? 9.4f * dp : 10 * dp;
+        float libStep = compact ? 14.5f * dp : 17 * dp;
         for (String s : libs) {
-            txt(c, s, rx, ry, 10.5f * dp, 0xFFA7B2C7, tfReg, Paint.Align.LEFT);
-            ry += 17 * dp;
+            txt(c, fitText(s, maxW, libSize, tfReg), x, y, libSize, 0xFFA7B2C7,
+                    tfReg, Paint.Align.LEFT);
+            y += libStep;
         }
-        txt(c, "底部「返回」回到 HUD", right.right - 18 * dp, right.bottom - 12 * dp,
-                10 * dp, 0xFF6F8099, tfReg, Paint.Align.RIGHT);
 
-        drawBar(c, new String[]{"HUD 预览", "S5 校准", "返回", "关于"}, 3);
+        y += 8 * dp;
+        txt(c, fitText("组件只用于局域网串流，不上传视频或账号。", maxW, libSize, tfReg),
+                x, y, libSize, 0xFF9FB0C6, tfReg, Paint.Align.LEFT);
+        y += libStep;
+        txt(c, fitText(buildLine(), maxW, libSize, tfReg), x, y, libSize,
+                0xFF6F8099, tfReg, Paint.Align.LEFT);
     }
 
     private void cardBox(Canvas c, RectF r) {
@@ -1258,8 +1377,12 @@ public class StageView extends View {
         c.drawRoundRect(chrome, 30 * dp, 30 * dp, p);
         p.setStyle(Paint.Style.FILL);
 
+        barZones.clear();
+        float cell = chrome.width() / labels.length;
         for (int i = 0; i < labels.length; i++) {
-            RectF z = zones[i];
+            RectF z = new RectF(chrome.left + i * cell, chrome.top,
+                    chrome.left + (i + 1) * cell, chrome.bottom);
+            barZones.add(z);
             if (i == selected) {
                 p.setColor(0x1FFFB454);
                 c.drawRoundRect(z.left + 5 * dp, z.top + 7 * dp, z.right - 5 * dp, z.bottom - 7 * dp, 24 * dp, 24 * dp, p);
@@ -1297,6 +1420,7 @@ public class StageView extends View {
         }
         if (e.getAction() == MotionEvent.ACTION_UP) {
             float x = e.getX(), y = e.getY();
+
             if (screen == SCR_CALIB) {
                 for (int i = 0; i < 3; i++) {
                     if (modelChips[i].contains(x, y)) {
@@ -1316,83 +1440,12 @@ public class StageView extends View {
                     }
                     return true;
                 }
-            }
-            if (screen == SCR_SPLASH) {
-                showHud();
-                return true;
-            }
-            if (screen == SCR_HUD && undoPath != null && undoZone.contains(x, y)) {
-                if (android.os.SystemClock.uptimeMillis() <= undoUntil && undoListener != null) {
-                    String path = undoPath;
-                    String mode = undoMode;
-                    long position = undoPositionMs;
-                    clearUndo();
-                    undoListener.onUndoPlay(path, mode, position);
-                }
-                return true;
-            }
-            if (screen == SCR_HUD && openZone.contains(x, y)) {
-                if (openVideoListener != null) {
-                    openVideoListener.onOpenVideo();
-                }
-                return true;
-            }
-            if (screen == SCR_HUD && vrZone.contains(x, y)) {
-                if (enterVrListener != null) {
-                    enterVrListener.onEnterVr();
-                }
-                return true;
-            }
-            if (screen == SCR_HUD) {
-                for (int i = 0; i < historyZones.size() && i < history.size(); i++) {
-                    if (historyZones.get(i).contains(x, y)) {
-                        PlayHistory.Entry entry = history.get(i);
-                        if (historyPlayListener != null) {
-                            historyPlayListener.onHistoryPlay(entry.source, entry.mode,
-                                    entry.startAt());
-                        }
-                        return true;
-                    }
-                }
-            }
-            if (!hudVisible && wakeZone.contains(x, y)) {
-                hudVisible = true;
-                invalidate();
-                return true;
-            }
-            if (screen == SCR_HUD && hudVisible) {
-                float dx = x - X(0f);
-                float dy = y - Y(-18f);
-                float radius = 5.5f * ppd;
-                if (dx * dx + dy * dy <= radius * radius) {
-                    if (openVideoListener != null) {
-                        openVideoListener.onOpenVideo();
-                    }
-                    return true;
-                }
-            }
-            if (zones[0].contains(x, y)) {
-                screen = SCR_HUD;
-                invalidate();
-                return true;
-            }
-            if (zones[1].contains(x, y)) {
-                screen = SCR_CALIB;
-                invalidate();
-                return true;
-            }
-            if (zones[3].contains(x, y)) {
-                screen = SCR_ABOUT;
-                invalidate();
-                return true;
-            }
-            if (zones[2].contains(x, y)) {
-                if (screen == SCR_ABOUT) {
-                    screen = SCR_HUD;
+                if (!barZones.isEmpty() && barZones.get(0).contains(x, y)) {
+                    screen = SCR_SETTINGS;
                     invalidate();
                     return true;
                 }
-                if (screen == SCR_CALIB) {
+                if (barZones.size() > 1 && barZones.get(1).contains(x, y)) {
                     CalibParams cp = calibParams();
                     cp.resetToModel(CalibParams.MODEL_GENERIC);
                     cp.ipdMm = CalibParams.IPD_DEFAULT;
@@ -1400,13 +1453,115 @@ public class StageView extends View {
                     cp.vertRightDeg = 0f;
                     cp.screenInch = 6.3f;
                     saveCalib();
-                } else {
+                    return true;
+                }
+                return true;
+            }
+
+            if (screen == SCR_SPLASH) {
+                showHome();
+                return true;
+            }
+
+            if (screen == SCR_SETTINGS) {
+                if (settingsBack.contains(x, y)) {
+                    screen = SCR_HOME;
+                    invalidate();
+                    return true;
+                }
+                if (settingsRows[0].contains(x, y)) {
+                    hudVisible = true;
+                    screen = SCR_HUD;
+                    invalidate();
+                    return true;
+                }
+                if (settingsRows[1].contains(x, y)) {
+                    if (startCalibListener != null) {
+                        startCalibListener.onStartCalib();
+                    }
+                    return true;
+                }
+                if (settingsRows[2].contains(x, y)) {
+                    if (flipImageListener != null) {
+                        flipImageListener.onFlipImage();
+                    }
+                    return true;
+                }
+                return true;
+            }
+
+            if (screen == SCR_HOME) {
+                if (homeGear.contains(x, y)) {
+                    screen = SCR_SETTINGS;
+                    invalidate();
+                    return true;
+                }
+                if (undoPath != null && undoZone.contains(x, y)) {
+                    if (android.os.SystemClock.uptimeMillis() <= undoUntil && undoListener != null) {
+                        String path = undoPath;
+                        String mode = undoMode;
+                        long position = undoPositionMs;
+                        clearUndo();
+                        undoListener.onUndoPlay(path, mode, position);
+                    }
+                    return true;
+                }
+                if (homeCard.contains(x, y)) {
+                    if (!history.isEmpty()) {
+                        playHistory(history.get(0));
+                    } else if (openVideoListener != null) {
+                        openVideoListener.onOpenVideo();
+                    }
+                    return true;
+                }
+                for (int i = 0; i < historyZones.size() && i < history.size(); i++) {
+                    if (historyZones.get(i).contains(x, y)) {
+                        playHistory(history.get(i));
+                        return true;
+                    }
+                }
+                if (homeAllZone.contains(x, y) || homeLibrary.contains(x, y)) {
+                    if (openVideoListener != null) {
+                        openVideoListener.onOpenVideo();
+                    }
+                    return true;
+                }
+                if (homeVr.contains(x, y)) {
+                    if (enterVrListener != null) {
+                        enterVrListener.onEnterVr();
+                    }
+                    return true;
+                }
+                return true;
+            }
+
+            if (screen == SCR_HUD) {
+                if (!hudVisible && wakeZone.contains(x, y)) {
+                    hudVisible = true;
+                    invalidate();
+                    return true;
+                }
+                if (barZones.size() > 1
+                        && barZones.get(0).contains(x, y)) {
                     hudVisible = !hudVisible;
                     invalidate();
+                    return true;
+                }
+                if (barZones.size() > 1
+                        && barZones.get(1).contains(x, y)) {
+                    screen = SCR_SETTINGS;
+                    invalidate();
+                    return true;
                 }
                 return true;
             }
         }
         return true;
+    }
+
+    private void playHistory(PlayHistory.Entry entry) {
+        if (historyPlayListener != null) {
+            historyPlayListener.onHistoryPlay(entry.source, entry.mode, entry.startAt());
+        }
     }
 }

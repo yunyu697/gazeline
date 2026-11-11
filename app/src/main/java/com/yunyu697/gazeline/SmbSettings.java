@@ -44,7 +44,7 @@ final class SmbSettings {
         String path = "";
         String user = "";
         String password = "";
-        String projection = "360";
+        String projection = "auto";
         boolean anonymous;
         boolean autoReconnect = true;
 
@@ -69,8 +69,11 @@ final class SmbSettings {
     boolean anonymous;
     /** Reconnect to the active record when the library opens. */
     boolean autoReconnect = true;
-    /** Last projection picked in the library: "360" or "sbs". */
-    String projection = "360";
+    /**
+     * Default projection for files that give no hint: "auto" lets the filename
+     * and frame shape decide; otherwise a key from {@link ProjectionMode#key()}.
+     */
+    String projection = "auto";
     /** Name of the record the flat fields were loaded from; "" when unsaved. */
     String profileName = "";
 
@@ -85,7 +88,7 @@ final class SmbSettings {
         s.password = p.getString(KEY_PASS, "");
         s.anonymous = p.getBoolean(KEY_ANONYMOUS, false);
         s.autoReconnect = p.getBoolean(KEY_AUTO_RECONNECT, true);
-        s.projection = p.getString(KEY_PROJECTION, "360");
+        s.projection = p.getString(KEY_PROJECTION, "auto");
         s.profileName = p.getString(KEY_ACTIVE, "");
         if (!p.contains(KEY_PROFILES) && s.isConfigured()) {
             // 1.0.x stored a single endpoint: promote it to the first record.
@@ -198,7 +201,7 @@ final class SmbSettings {
                 p.password = o.optString("password", "");
                 p.anonymous = o.optBoolean("anonymous", false);
                 p.autoReconnect = o.optBoolean("autoReconnect", true);
-                p.projection = o.optString("projection", "360");
+                p.projection = o.optString("projection", "auto");
                 if (p.name.length() > 0) {
                     out.add(p);
                 }
