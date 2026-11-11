@@ -109,11 +109,16 @@ final class GvrRenderer implements GvrView.StereoRenderer {
             + "  vUv = aPos * 0.5 + 0.5;\n"
             + "  gl_Position = vec4(aPos, 0.0, 1.0);\n"
             + "}\n";
+    /**
+     * The HUD arrives as an Android Bitmap, whose first row is the top of the
+     * picture, while GLUtils uploads it so that t=0 is that first row. Sampling
+     * t directly therefore paints the layer upside down, so v is flipped here.
+     */
     private static final String HUD_FS =
             "precision mediump float;\n"
             + "uniform sampler2D uTex;\n"
             + "varying vec2 vUv;\n"
-            + "void main() { gl_FragColor = texture2D(uTex, vUv); }\n";
+            + "void main() { gl_FragColor = texture2D(uTex, vec2(vUv.x, 1.0 - vUv.y)); }\n";
 
     /** Full horizontal angle of the flat virtual screen, matching the old 70° panel. */
     private static final float FLAT_FOV_DEG = 70f;

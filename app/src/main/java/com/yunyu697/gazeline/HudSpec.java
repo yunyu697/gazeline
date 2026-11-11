@@ -129,6 +129,8 @@ final class HudSpec {
         MENU_SUB_STYLE,
         MENU_PROJ,
         MENU_PACK,
+        /** Inter-lens distance of the virtual viewer; cycling it re-aligns the eyes. */
+        MENU_IPD,
         MENU_EXIT,
         EXIT_CANCEL,
         EXIT_OK,
@@ -206,6 +208,8 @@ final class HudSpec {
                     return "投影";
                 case MENU_PACK:
                     return "立体排布";
+                case MENU_IPD:
+                    return "瞳距";
                 case BROWSER_PREV:
                     return "上一页";
                 case BROWSER_NEXT:
@@ -416,22 +420,25 @@ final class HudSpec {
      */
     static final Target MENU_BACK_P1_T = new Target(
             Id.MENU_BACK, 0f, -22.4f, 52f, 5.8f, L1_MS, true, true);
+    // Page 2 has nine rows, so it packs them tighter than page 1's 6.4° pitch.
     static final Target MENU_VOLUME_T = new Target(
-            Id.MENU_VOLUME, 0f, 23.4f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_VOLUME, 0f, 23.4f, 52f, 5.3f, L2_MS, true, true);
     static final Target MENU_PROJ_T = new Target(
-            Id.MENU_PROJ, 0f, 17.2f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_PROJ, 0f, 18.0f, 52f, 5.3f, L2_MS, true, true);
     static final Target MENU_PACK_T = new Target(
-            Id.MENU_PACK, 0f, 11.0f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_PACK, 0f, 12.6f, 52f, 5.3f, L2_MS, true, true);
+    static final Target MENU_IPD_T = new Target(
+            Id.MENU_IPD, 0f, 7.1f, 52f, 5.3f, L2_MS, true, true);
     static final Target MENU_SERVER_T = new Target(
-            Id.MENU_SERVER, 0f, 4.8f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_SERVER, 0f, 1.7f, 52f, 5.3f, L2_MS, true, true);
     static final Target MENU_SUB_STYLE_T = new Target(
-            Id.MENU_SUB_STYLE, 0f, -1.4f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_SUB_STYLE, 0f, -3.7f, 52f, 5.3f, L2_MS, true, true);
     static final Target MENU_FILE_P2_T = new Target(
-            Id.MENU_FILE, 0f, -7.6f, 52f, 6.2f, L2_MS, true, true);
+            Id.MENU_FILE, 0f, -9.2f, 52f, 5.3f, L2_MS, true, true);
     static final Target MENU_BACK_T = new Target(
-            Id.MENU_BACK, 0f, -13.8f, 52f, 6.2f, L1_MS, true, true);
+            Id.MENU_BACK, 0f, -14.6f, 52f, 5.3f, L1_MS, true, true);
     static final Target MENU_EXIT_T = new Target(
-            Id.MENU_EXIT, 0f, -20.0f, 52f, 6.2f, L3_MS, true, true);
+            Id.MENU_EXIT, 0f, -20.0f, 52f, 5.3f, L3_MS, true, true);
 
     /** Page 1 keeps the everyday controls; 更多设置 flips to page 2. */
     static final Target[] MENU_ROWS_P1 = {
@@ -439,7 +446,7 @@ final class HudSpec {
             MENU_AUTO_BRIGHT_T, MENU_WAKE_T, MENU_MORE_T, MENU_BACK_P1_T
     };
     static final Target[] MENU_ROWS_P2 = {
-            MENU_VOLUME_T, MENU_PROJ_T, MENU_PACK_T, MENU_SERVER_T,
+            MENU_VOLUME_T, MENU_PROJ_T, MENU_PACK_T, MENU_IPD_T, MENU_SERVER_T,
             MENU_SUB_STYLE_T, MENU_FILE_P2_T, MENU_BACK_T, MENU_EXIT_T
     };
 

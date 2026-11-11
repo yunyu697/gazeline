@@ -79,6 +79,9 @@ public class PlayerActivity extends Activity
     private Bitmap hudBitmap;
     private long renderedHudSig = -1;
     private long lastTriggerMs;
+    /** Inter-lens distance in millimetres; 0 means "use the viewer default". */
+    private int ipdMm;
+    private GvrViewerParams viewerParams;
 
     private ProjectionMode mode = ProjectionMode.FLAT_MONO;
     /** The user picked a projection in the menu; detection must not undo it. */
@@ -359,7 +362,15 @@ public class PlayerActivity extends Activity
             gvrView.setTransitionViewEnabled(false);
             // No paired viewer means the SDK would sit in its setup overlay;
             // the built-in Cardboard profile gets straight stereo playback.
-            gvrView.updateGvrViewerParams(GvrViewerParams.cardboardV1ViewerParams());
+            // The lens distance is the only viewer value worth exposing: it is
+            // what users actually tune, and playback keeps running while they do.
+            viewerParams = GvrViewerParams.cardboardV1ViewerParams();
+            if (ipdMm <= 0) {
+                ipdMm = Math.round(viewerParams.getInterLensDistance() * 1000f);
+            } else {
+                viewerParams.setInterLensDistance(ipdMm / 1000f);
+            }
+            gvrView.updateGvrViewerParams(viewerParams);
             gvrView.setDistortionCorrectionEnabled(!isEmulator());
             gvrView.setRenderer(renderer);
             // A screen tap is the trigger on a phone without a viewer button;
@@ -435,6 +446,11 @@ public class PlayerActivity extends Activity
         super.onResume();
         if (gvrView != null) {
             gvrView.onResume();
+            // The SDK restores its own saved viewer while resuming, which would
+            // undo a lens distance tuned in an earlier session; re-apply ours.
+            if (viewerParams != null) {
+                gvrView.updateGvrViewerParams(viewerParams);
+            }
         }
         if (renderer != null) {
             renderer.setFreeze(false);
@@ -1055,6 +1071,7 @@ public class PlayerActivity extends Activity
         frame.subStyleText = SUB_STYLE_LABELS[subStyle];
         frame.projText = mode.projLabel();
         frame.packText = mode.packLabel();
+        frame.ipdText = ipdMm + " mm";
         frame.projOption = currentProjOption();
         frame.subtitleScale = SUB_STYLE_SCALE[subStyle];
         frame.subtitleOutline = subStyle != 2;
@@ -1115,6 +1132,7 @@ public class PlayerActivity extends Activity
         autoBright = p.getBoolean("auto", false);
         wakeLevel = p.getInt("wake", 1);
         subStyle = p.getInt("sub_style", 0);
+        ipdMm = p.getInt("ipd", 0);
         flipImage = p.getBoolean("flip", false);
         if (brightLevel < 0 || brightLevel >= BRIGHT_LEVELS.length) {
             brightLevel = 4;
@@ -1134,6 +1152,7 @@ public class PlayerActivity extends Activity
                 .putBoolean("auto", autoBright)
                 .putInt("wake", wakeLevel)
                 .putInt("sub_style", subStyle)
+                .putInt("ipd", ipdMm)
                 .apply();
     }
 
@@ -1306,6 +1325,33 @@ public class PlayerActivity extends Activity
         applyProjection(ProjectionMode.of(mode.proj, next), true);
     }
 
+    private static final int IPD_MIN_MM = 54;
+    private static final int IPD_MAX_MM = 72;
+    private static final int IPD_STEP_MM = 2;
+
+    /**
+     * The viewer's lens spacing is the one number worth tuning while watching:
+     * the two images merge or split as it changes, so the picture is the gauge.
+     * Stepping it on each trigger keeps the single-trigger interaction intact.
+     */
+    private void cycleIpd() {
+        int next = ipdMm + IPD_STEP_MM;
+        if (next > IPD_MAX_MM) {
+            next = IPD_MIN_MM;
+        }
+        ipdMm = next;
+        if (viewerParams != null && gvrView != null) {
+            viewerParams.setInterLensDistance(ipdMm / 1000f);
+            gvrView.updateGvrViewerParams(viewerParams);
+        }
+        saveDisplayPrefs();
+        String text = "瞳距 " + ipdMm + " mm";
+        showStatus(text);
+        if (overlay == OVERLAY_MENU) {
+            setOverlayHint(text);
+        }
+    }
+
     private void applyProjection(ProjectionMode m, boolean byUser) {
         if (m.proj == mode.proj && m.pack == mode.pack) {
             if (byUser) {
@@ -1448,6 +1494,9 @@ public class PlayerActivity extends Activity
                 break;
             case MENU_PACK:
                 cyclePacking();
+                break;
+            case MENU_IPD:
+                cycleIpd();
                 break;
             case BROWSER_ITEM:
             case BROWSER_PREV:

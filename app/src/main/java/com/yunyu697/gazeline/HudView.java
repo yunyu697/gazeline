@@ -86,6 +86,8 @@ final class HudView extends View {
         /** Current projection label, e.g. "360°" / "鱼眼180°", and its packing. */
         String projText = "平面";
         String packText = "单眼";
+        /** Inter-lens distance in millimetres, e.g. "62 mm". */
+        String ipdText = "60 mm";
         /** Picker row that is currently in force (-1 when none matches). */
         int projOption = -1;
         float subtitleScale = 1f;
@@ -264,6 +266,7 @@ final class HudView extends View {
         frame.subStyleText = f.subStyleText;
         frame.projText = f.projText;
         frame.packText = f.packText;
+        frame.ipdText = f.ipdText;
         frame.projOption = f.projOption;
         frame.subtitleScale = f.subtitleScale;
         frame.subtitleOutline = f.subtitleOutline;
@@ -308,6 +311,7 @@ final class HudView extends View {
         sig = sig * 31 + (f.subStyleText == null ? 0 : f.subStyleText.hashCode());
         sig = sig * 31 + (f.projText == null ? 0 : f.projText.hashCode());
         sig = sig * 31 + (f.packText == null ? 0 : f.packText.hashCode());
+        sig = sig * 31 + (f.ipdText == null ? 0 : f.ipdText.hashCode());
         sig = sig * 31 + f.projOption;
         sig = sig * 31 + (int) (f.subtitleScale * 100);
         sig = sig * 31 + (f.subtitleOutline ? 1 : 0);
@@ -1583,6 +1587,8 @@ final class HudView extends View {
                 return "◎";
             case MENU_PACK:
                 return "立";
+            case MENU_IPD:
+                return "瞳";
             case MENU_EXIT:
             default:
                 return "退";
@@ -1619,6 +1625,8 @@ final class HudView extends View {
                 return f.projText;
             case MENU_PACK:
                 return f.packText;
+            case MENU_IPD:
+                return f.ipdText;
             case MENU_EXIT:
             default:
                 return "2.5s+确认";
@@ -1655,6 +1663,8 @@ final class HudView extends View {
                 return "平面 / 360° / 180° / 鱼眼 · 注视切换";
             case MENU_PACK:
                 return "单眼 / 左右 / 上下";
+            case MENU_IPD:
+                return "左右眼间距 · 点击循环 54–72 mm";
             case MENU_EXIT:
             default:
                 return "回片库 · 保留进度，5 s 内可撤销";
@@ -1775,6 +1785,8 @@ final class HudView extends View {
                 return "切换投影方式";
             case MENU_PACK:
                 return "切换立体排布";
+            case MENU_IPD:
+                return "调整瞳距";
             case MENU_EXIT:
                 return "退出播放";
             case EXIT_CANCEL:
