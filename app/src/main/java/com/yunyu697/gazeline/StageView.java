@@ -94,6 +94,9 @@ public class StageView extends View {
     private final RectF homeLibrary = new RectF();
     private final RectF homeVr = new RectF();
     private final RectF homeAllZone = new RectF();
+    /** Bounds of the recent list: the card column in portrait, the right
+     *  column in landscape. */
+    private float histLeft, histRight, histTop;
     private final RectF settingsBack = new RectF();
     private final RectF[] settingsRows = {new RectF(), new RectF(), new RectF()};
     private final java.util.List<RectF> historyZones = new java.util.ArrayList<>();
@@ -274,11 +277,21 @@ public class StageView extends View {
         float actionsTop = actionsBottom - actionsH;
 
         if (landscape) {
-            homeCard.set(homeLeft, 60 * dp, homeRight, 60 * dp + 136 * dp);
-            float gap = 10 * dp;
-            float vrW = (homeRight - homeLeft - gap) * 0.34f;
-            homeLibrary.set(homeLeft, actionsTop, homeRight - gap - vrW, actionsBottom);
-            homeVr.set(homeLibrary.right + gap, actionsTop, homeRight, actionsBottom);
+            // Two real columns, not a centred portrait page: the resume card
+            // and the headset entry fill the left column, the recent list and
+            // the library entry fill the right one.
+            float colGap = 22 * dp;
+            float half = (homeRight - homeLeft - colGap) / 2f;
+            float lL = homeLeft;
+            float lR = homeLeft + half;
+            float rL = lR + colGap;
+            float rR = homeRight;
+            homeCard.set(lL, 60 * dp, lR, actionsTop - 20 * dp);
+            homeVr.set(lL, actionsTop, lR, actionsBottom);
+            homeLibrary.set(rL, actionsTop, rR, actionsBottom);
+            histLeft = rL;
+            histRight = rR;
+            histTop = 60 * dp;
         } else {
             float cardH = Math.min(188 * dp, H * 0.28f);
             homeCard.set(m, 70 * dp, W - m, 70 * dp + cardH);
@@ -286,6 +299,9 @@ public class StageView extends View {
             float vrW = (W - 2 * m - gap) * 0.34f;
             homeLibrary.set(m, actionsTop, W - m - gap - vrW, actionsBottom);
             homeVr.set(homeLibrary.right + gap, actionsTop, W - m, actionsBottom);
+            histLeft = homeCard.left;
+            histRight = homeCard.right;
+            histTop = homeCard.bottom + 24 * dp;
         }
         homeAllZone.setEmpty();
     }
@@ -545,9 +561,9 @@ public class StageView extends View {
     /** At most three rows; the list never competes with the card or the buttons. */
     private void drawHomeHistory(Canvas c) {
         historyZones.clear();
-        float left = homeCard.left;
-        float right = homeCard.right;
-        float top = homeCard.bottom + 24 * dp;
+        float left = histLeft;
+        float right = histRight;
+        float top = histTop;
         float limit = homeLibrary.top - 12 * dp;
         if (undoPath != null) {
             limit = Math.min(limit, homeLibrary.top - 62 * dp);

@@ -142,16 +142,29 @@ public class LibraryActivity extends Activity {
 
     // ------------------------------------------------------------- shell
 
-    private View buildRoot() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(C_BG);
+    /**
+     * The shell is rebuilt for the orientation instead of stretching the
+     * portrait stack: portrait keeps the nav under the body, landscape moves
+     * it to a left sidebar and widens the page margins so the rows read as a
+     * column, not a full-width smear.
+     */
+    private LinearLayout rootOuter;
+    private LinearLayout rootInner;
+    private LinearLayout navBar;
+    private boolean navLandscape;
 
-        root.addView(buildBar(), new LinearLayout.LayoutParams(
+    private View buildRoot() {
+        rootOuter = new LinearLayout(this);
+        rootOuter.setOrientation(LinearLayout.VERTICAL);
+        rootOuter.setBackgroundColor(C_BG);
+
+        rootInner = new LinearLayout(this);
+        rootInner.setOrientation(LinearLayout.VERTICAL);
+        rootInner.addView(buildBar(), new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         FrameLayout body = new FrameLayout(this);
-        root.addView(body, new LinearLayout.LayoutParams(
+        rootInner.addView(body, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         homeScroll = scrollHost(homePage());
@@ -163,9 +176,67 @@ public class LibraryActivity extends Activity {
         body.addView(serverScroll, matchParams());
         body.addView(settingsScroll, matchParams());
 
-        root.addView(buildNav(), new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        return root;
+        navBar = (LinearLayout) buildNav();
+        navLandscape = !isLandscape();
+        applyOrientation();
+        return rootOuter;
+    }
+
+    private boolean isLandscape() {
+        return getResources().getConfiguration().orientation
+                == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        applyOrientation();
+    }
+
+    private void applyOrientation() {
+        boolean land = isLandscape();
+        if (land == navLandscape) {
+            return;
+        }
+        navLandscape = land;
+        rootOuter.removeAllViews();
+        if (land) {
+            rootOuter.setOrientation(LinearLayout.HORIZONTAL);
+            navBar.setOrientation(LinearLayout.VERTICAL);
+            navBar.setPadding(0, dp(10), 0, dp(10));
+            rootOuter.addView(navBar, new LinearLayout.LayoutParams(
+                    dp(104), LinearLayout.LayoutParams.MATCH_PARENT));
+            rootOuter.addView(rootInner, new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+            for (TextView item : navItems) {
+                item.setLayoutParams(new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT));
+                item.setPadding(0, dp(12), 0, dp(12));
+            }
+        } else {
+            rootOuter.setOrientation(LinearLayout.VERTICAL);
+            navBar.setOrientation(LinearLayout.HORIZONTAL);
+            navBar.setPadding(0, dp(6), 0, dp(6));
+            rootOuter.addView(rootInner, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+            rootOuter.addView(navBar, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            for (TextView item : navItems) {
+                item.setLayoutParams(new LinearLayout.LayoutParams(0,
+                        LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+                item.setPadding(0, dp(6), 0, dp(6));
+            }
+        }
+        int pad = land ? dp(56) : dp(14);
+        ScrollView[] scrolls = {homeScroll, filesScroll, serverScroll, settingsScroll};
+        for (ScrollView s : scrolls) {
+            if (s != null && s.getChildCount() > 0) {
+                View page = s.getChildAt(0);
+                page.setPadding(pad, page.getPaddingTop(), pad, page.getPaddingBottom());
+            }
+        }
     }
 
     private LinearLayout buildBar() {
