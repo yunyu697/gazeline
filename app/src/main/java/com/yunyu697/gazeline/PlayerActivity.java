@@ -1024,10 +1024,6 @@ public class PlayerActivity extends Activity
 
     private void closeOverlay(String status) {
         long now = SystemClock.elapsedRealtime();
-        Log.i("Gazeline", "closeOverlay '" + status + "' ov=" + overlay
-                + " leaveSince=" + menuLeaveSince + " openedAgo=" + (now - menuOpenedAt)
-                + " rel=" + menuGaze.readout().relYaw + "," + menuGaze.readout().relPitch
-                + " by " + new Throwable().getStackTrace()[1]);
         overlay = OVERLAY_NONE;
         overlayAlpha = 0f;
         overlayHint = "";
