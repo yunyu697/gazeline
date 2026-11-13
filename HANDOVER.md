@@ -1,6 +1,6 @@
 # Gazeline 开发交接文档
 
-> 生成时间：2026-11-13 · 当前版本：1.1.0-alpha17（未提交改动即 alpha18 的半成品）
+> 生成时间：2026-11-13 · 当前版本：1.1.0-alpha18（已提交、已打 tag 发布）
 > 仓库：https://github.com/yunyu697/gazeline.git（main 分支，annotated tag 发布）
 
 ---
@@ -79,7 +79,7 @@ adb shell screencap -p /sdcard/s.png; adb pull /sdcard/s.png .tmp\s.png
 
 三个待修问题 + 一个发布任务，详见 5.3。
 
-### 5.2 工作区有 6 个未提交文件（就是 alpha18 的内容）
+### 5.2 alpha18 的内容（已提交为 `fix(vr)` / `feat(ui)` 两个 commit）
 
 `GvrRenderer.java` `HudView.java` `GazeController.java` `PlayerActivity.java` `StageView.java` `LibraryActivity.java`。改动内容：
 
@@ -88,18 +88,20 @@ adb shell screencap -p /sdcard/s.png; adb pull /sdcard/s.png .tmp\s.png
    - 病根②：SDK 触发回调在 **手指按下瞬间** 就 fire（日志实锤：`touch DOWN` 与 `SDK trigger fired` 同毫秒），拖拽转头的按下会误触发。已改为按下时挂起（`pendingScreenTap`），UP 且未拖出 48px 才真正触发；无触摸的回调（Cardboard 物理按钮/磁铁）立即生效。
    - 附带：HUD 重绘节流 65ms（~15Hz）、signature() 去掉 relYaw/relPitch（转头不再触发重绘）、移除 `enableCardboardTriggerEmulation`（会把快速拖拽误判为 tap）。
    - 模拟器证据：菜单以内容空间投影正确打开（`.tmp\s5b.png` 双眼截图）、准星随拖拽正确移动、rel 坐标随 swipe 变化（日志 `rel=-0.25,26.3`）。
-   - ⚠️ PlayerActivity 里 `Log.i("Gazeline", "closeOverlay ...")` 是**临时诊断日志，发布前必须删**。
-2. **卡顿缓解（部分）**：HUD 重绘节流已做；帧率未实测，**需要真机数据或至少模拟器 flush 速率证据**。
-3. **横屏真重排（代码完成，未截图验证）**：StageView 主页横屏双栏（左=入口卡片+VR按钮，右=最近播放列表，`histLeft/histRight/histTop`）；LibraryActivity 横屏左侧 104dp 导航栏（`applyOrientation()`，onConfigurationChanged 触发）。**需要模拟器横屏截图验证两个页面**。
+   - 临时诊断日志已在 alpha18 发布前删除（现已无任何 `Log` 调用）。
+2. **卡顿缓解（部分验证）**：HUD 重绘节流已做；模拟器上屏间隔数据见 `.tmp` 中三组对比（抖动帧占比中位 19.8%→13.2%，但区间重叠，**不足以宣称提升**），真机帧率仍未验证。
+3. **横屏真重排（模拟器已截图验证）**：StageView 主页横屏双栏（左=入口卡片+VR按钮，右=最近播放列表，`histLeft/histRight/histTop`）；LibraryActivity 横屏左侧 104dp 导航栏（`applyOrientation()`，onConfigurationChanged 触发）。截图：`.tmp\o2-home-landscape.png`、`.tmp\o3-lib-landscape.png`、`.tmp\o5-lib-list-landscape.png`（竖屏对照 `o1`/`o4`）。
 4. ⚠️ 已知测试序列陷阱：启动 6s 后 HUD 自动淡出，第一次 tap 只 showHud() 不开菜单——脚本测试要先 tap 唤出 HUD。
 
 ### 5.3 接手者的 TODO（按序）
 
-1. 删临时日志 → 重跑凝视全流程（开菜单→拖拽对准一行→tap 选中→截图+logcat 证据）。
-2. 横屏截图验证 StageView 双栏 + LibraryActivity 侧栏（竖横各一张）。
-3. 卡顿：真机/GPU 实测帧率，量化节流前后差异（可用 `dumpsys gfxinfo com.yunyu697.gazeline.debug`）。
-4. version.txt → `1.1.0-alpha18`，构建 debug+release，报 SHA256，提交、打 tag `v1.1.0-alpha18`、push（**发布前把改动拆成逻辑独立 commit，沿用历史风格如 `fix(vr): ...`**）。
-5. push 前用户要求过：每版发布后做匿名核对（仓库公开可访问、Release 附件匿名可下载、哈希一致）。
+1. ~~删临时日志 → 重跑凝视全流程~~ 已完成（`.tmp\g2-menu.png` / `g3-aim.png` / `g4-select.png` / `g5-after.png`）。
+2. ~~横屏截图验证 StageView 双栏 + LibraryActivity 侧栏~~ 已完成（`.tmp\o1`~`o5`）。
+3. ~~卡顿量化~~ 已完成，结论见 5.2 第 2 条；**真机帧率仍是空白项**。
+4. ~~version.txt → `1.1.0-alpha18`、构建 debug+release、提交、打 tag、发布~~ 已完成。
+5. 每版发布后匿名核对（仓库公开可访问、Release 附件匿名可下载、哈希一致）——已固化为发布流程的最后一步。
+
+下一版优先项：真机验证（凝视/回中/S5 校准注视失效/4K60 HEVC 10bit/72Hz）、SMB 实网串流。
 
 ## 6. 验证过的结论（不要重新怀疑）
 
