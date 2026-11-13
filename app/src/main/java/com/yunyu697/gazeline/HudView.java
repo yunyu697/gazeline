@@ -117,6 +117,41 @@ final class HudView extends View {
     private Listener listener;
     private final GestureDetector gestures;
 
+    /**
+     * True when the layer is rasterised for the VR renderer. The bitmap is then
+     * projected into the content space by the GL shader, so rows are drawn at
+     * their absolute anchor-relative angles (no gaze shift), the reticle is
+     * drawn by GL at the true gaze ray, and the full-view dim is a GL quad.
+     */
+    private boolean vrMode;
+    private final GazeController.Readout vrScratch = new GazeController.Readout();
+
+    void setVrMode(boolean on) {
+        vrMode = on;
+    }
+
+    /** A readout with the gaze shift zeroed: the GL projection applies it. */
+    private GazeController.Readout vrRel(GazeController.Readout g) {
+        if (!vrMode || g == null) {
+            return g;
+        }
+        vrScratch.focus = g.focus;
+        vrScratch.cancelling = g.cancelling;
+        vrScratch.progress = g.progress;
+        vrScratch.cancelProgress = g.cancelProgress;
+        vrScratch.remainingSec = g.remainingSec;
+        vrScratch.charging = g.charging;
+        vrScratch.ready = g.ready;
+        vrScratch.dwell = g.dwell;
+        vrScratch.wakeProgress = g.wakeProgress;
+        vrScratch.wakeUp = g.wakeUp;
+        vrScratch.anchorYaw = g.anchorYaw;
+        vrScratch.anchorPitch = g.anchorPitch;
+        vrScratch.relYaw = 0f;
+        vrScratch.relPitch = 0f;
+        return vrScratch;
+    }
+
     private float eyeCx;
     private float eyeCy;
     private float halfW;
@@ -207,15 +242,17 @@ final class HudView extends View {
         eyeCy = h / 2f;
         halfW = w * 0.55f;
         pxPerDeg = halfW * 0.017453292f;
-        if (frame.maskAlpha > 0f) {
-            maskPaint.setColor(0xFF04070C);
-            maskPaint.setAlpha((int) (Math.min(1f, frame.maskAlpha) * 255));
-            c.drawRect(0, 0, w, h, maskPaint);
-        }
-        if (frame.overlay != 0 && frame.overlayAlpha > 0.01f) {
-            maskPaint.setColor(0xFF04070C);
-            maskPaint.setAlpha((int) (0.46f * frame.overlayAlpha * 255));
-            c.drawRect(0, 0, w, h, maskPaint);
+        if (!vrMode) {
+            if (frame.maskAlpha > 0f) {
+                maskPaint.setColor(0xFF04070C);
+                maskPaint.setAlpha((int) (Math.min(1f, frame.maskAlpha) * 255));
+                c.drawRect(0, 0, w, h, maskPaint);
+            }
+            if (frame.overlay != 0 && frame.overlayAlpha > 0.01f) {
+                maskPaint.setColor(0xFF04070C);
+                maskPaint.setAlpha((int) (0.46f * frame.overlayAlpha * 255));
+                c.drawRect(0, 0, w, h, maskPaint);
+            }
         }
         drawEye(c);
     }
@@ -323,8 +360,10 @@ final class HudView extends View {
             sig = sig * 31 + (mg.cancelling == null ? 0 : mg.cancelling.id.ordinal() + 1);
             sig = sig * 31 + (int) (mg.progress * 1000);
             sig = sig * 31 + (int) (mg.cancelProgress * 1000);
-            sig = sig * 31 + (int) (mg.relYaw * 10);
-            sig = sig * 31 + (int) (mg.relPitch * 10);
+            if (!vrMode) {
+                sig = sig * 31 + (int) (mg.relYaw * 10);
+                sig = sig * 31 + (int) (mg.relPitch * 10);
+            }
             sig = sig * 31 + (mg.charging ? 1 : 0);
         }
         GazeController.Readout g = f.gaze;
@@ -333,8 +372,10 @@ final class HudView extends View {
             sig = sig * 31 + (g.cancelling == null ? 0 : g.cancelling.id.ordinal() + 1);
             sig = sig * 31 + (int) (g.progress * 1000);
             sig = sig * 31 + (int) (g.cancelProgress * 1000);
-            sig = sig * 31 + (int) (g.relYaw * 10);
-            sig = sig * 31 + (int) (g.relPitch * 10);
+            if (!vrMode) {
+                sig = sig * 31 + (int) (g.relYaw * 10);
+                sig = sig * 31 + (int) (g.relPitch * 10);
+            }
             sig = sig * 31 + (g.charging ? 1 : 0);
             sig = sig * 31 + (g.ready ? 1 : 0);
         }
@@ -411,7 +452,7 @@ final class HudView extends View {
         }
 
         if (frame.overlay != 0 && frame.overlayAlpha > 0.01f) {
-            GazeController.Readout mg = frame.overlayGaze;
+            GazeController.Readout mg = vrRel(frame.overlayGaze);
             if (frame.overlay == 1) {
                 drawMenu(c, mg == null ? EMPTY : mg, frame.overlayAlpha);
             } else if (frame.overlay == 3) {
@@ -421,12 +462,14 @@ final class HudView extends View {
             } else {
                 drawConfirm(c, mg == null ? EMPTY : mg, frame.overlayAlpha);
             }
-            drawReticle(c, frame.overlayAlpha);
+            if (!vrMode) {
+                drawReticle(c, frame.overlayAlpha);
+            }
             return;
         }
 
-        float relYaw = g.relYaw;
-        float relPitch = g.relPitch;
+        float relYaw = vrMode ? 0f : g.relYaw;
+        float relPitch = vrMode ? 0f : g.relPitch;
 
         if (frame.flashAlpha > 0f) {
             drawFlash(c, frame.flashAlpha);
@@ -441,7 +484,9 @@ final class HudView extends View {
             drawTarget(c, HudSpec.RECENTER, relYaw, relPitch, g, a);
             drawTarget(c, HudSpec.FILES, relYaw, relPitch, g, a);
             drawTarget(c, HudSpec.PROJ_T, relYaw, relPitch, g, a);
-            drawReticle(c, a);
+            if (!vrMode) {
+                drawReticle(c, a);
+            }
             drawGazeText(c, relYaw, relPitch, g, a);
         }
 

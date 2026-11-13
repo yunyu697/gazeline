@@ -18,6 +18,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.util.Log;
 import android.view.DisplayCutout;
 import android.view.Surface;
 import android.view.View;
@@ -78,6 +79,15 @@ public class PlayerActivity extends Activity
     private final HudView.Frame frame = new HudView.Frame();
     private Bitmap hudBitmap;
     private long renderedHudSig = -1;
+    /** When the SDK's trigger emulation last fired, to fold the tap paths. */
+    private long sdkTriggerMs;
+    /** When the screen was last pressed, to tell a tap from the viewer button. */
+    private long lastTouchDownMs;
+    /** SDK trigger parked on a finger-down, to be re-issued on the matching up. */
+    private boolean pendingScreenTap;
+    /** A 1024² redraw plus upload is heavy; ~15 Hz is plenty for the bar. */
+    private static final long HUD_RENDER_MIN_MS = 65L;
+    private long lastHudRenderMs;
     private long lastTriggerMs;
     /** Inter-lens distance in millimetres; 0 means "use the viewer default". */
     private int ipdMm;
@@ -373,31 +383,58 @@ public class PlayerActivity extends Activity
             gvrView.updateGvrViewerParams(viewerParams);
             gvrView.setDistortionCorrectionEnabled(!isEmulator());
             gvrView.setRenderer(renderer);
-            // A screen tap is the trigger on a phone without a viewer button;
-            // GvrView only routes taps to the listener when this is enabled.
-            gvrView.enableCardboardTriggerEmulation();
+            // The SDK fires its trigger callback the moment a finger goes down
+            // (its tap emulation runs on DOWN, not on release), which would act
+            // on the press that merely starts a head-turn drag. A callback that
+            // rides on a fresh screen-down is therefore parked and re-issued on
+            // the matching ACTION_UP only when the finger never left the tap
+            // radius; a callback with no recent touch is the viewer's physical
+            // button or magnet and acts at once.
             gvrView.setOnCardboardTriggerListener(new Runnable() {
                 @Override
                 public void run() {
+                    long now = SystemClock.elapsedRealtime();
+                    sdkTriggerMs = now;
+                    if (now - lastTouchDownMs < 120) {
+                        pendingScreenTap = true;
+                        return;
+                    }
                     onTrigger();
                 }
             });
-            // Belt and braces: a plain tap also counts. The SDK's emulation is
-            // enough on paper but costs nothing to keep, and the debounce below
-            // folds the two paths into one action.
             gvrView.setOnTouchListener(new View.OnTouchListener() {
-                private float downX;
-                private float downY;
+                private float lastX;
+                private float lastY;
+                private float moved;
 
                 @Override
                 public boolean onTouch(View v, android.view.MotionEvent e) {
-                    if (e.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
-                        downX = e.getX();
-                        downY = e.getY();
-                    } else if (e.getActionMasked() == android.view.MotionEvent.ACTION_UP) {
-                        float dx = e.getX() - downX;
-                        float dy = e.getY() - downY;
-                        if (dx * dx + dy * dy < 48f * 48f) {
+                    int a = e.getActionMasked();
+                    if (a == android.view.MotionEvent.ACTION_DOWN) {
+                        lastTouchDownMs = SystemClock.elapsedRealtime();
+                        pendingScreenTap = false;
+                        lastX = e.getX();
+                        lastY = e.getY();
+                        moved = 0f;
+                    } else if (a == android.view.MotionEvent.ACTION_MOVE) {
+                        float dx = e.getX() - lastX;
+                        float dy = e.getY() - lastY;
+                        lastX = e.getX();
+                        lastY = e.getY();
+                        moved += Math.abs(dx) + Math.abs(dy);
+                        // Past the tap radius the drag is the head turn of a
+                        // device without a tracker (the emulator): the same
+                        // trim the old attached-HudView gesture applied.
+                        if (moved >= 48f) {
+                            yaw += dx / 10f;
+                            pitch -= dy / 10f;
+                        }
+                    } else if (a == android.view.MotionEvent.ACTION_UP) {
+                        boolean parkedTap = pendingScreenTap;
+                        pendingScreenTap = false;
+                        if (moved < 48f
+                                && (parkedTap
+                                    || SystemClock.elapsedRealtime() - sdkTriggerMs > 1000)) {
                             onTrigger();
                         }
                     }
@@ -408,6 +445,7 @@ public class PlayerActivity extends Activity
 
         hud = new HudView(this);
         hud.setListener(this);
+        hud.setVrMode(gvrView != null);
         hud.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
             @Override
             public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
@@ -733,8 +771,23 @@ public class PlayerActivity extends Activity
         buildFrame(now, hudAlpha, wakeAlpha);
         hud.setFrame(frame, now);
         if (renderer != null) {
-            renderHud();
+            updateHudPose(hudAlpha);
+            renderHud(now);
         }
+    }
+
+    /**
+     * Hands the GL layer the gaze ray for the reticle, the anchor of whichever
+     * layer is on screen, and the full-view dim used by the overlays.
+     */
+    private void updateHudPose(float hudAlpha) {
+        GazeController.Readout active =
+                overlay != OVERLAY_NONE ? menuGaze.readout() : gaze.readout();
+        float reticleA = overlay != OVERLAY_NONE ? overlayAlpha : hudAlpha;
+        float dim = Math.max(maskAlpha,
+                overlay != OVERLAY_NONE ? 0.46f * overlayAlpha : 0f);
+        renderer.setHudPose(viewYaw, viewPitch, active.anchorYaw, active.anchorPitch,
+                reticleA, dim, active.focus != null ? 0xFFB0FFE0 : 0xFFEAF4FF);
     }
 
     /**
@@ -743,15 +796,19 @@ public class PlayerActivity extends Activity
      * would be neither duplicated per eye nor bent with the lenses, so the
      * layer is handed over as a texture instead.
      */
-    private void renderHud() {
+    private void renderHud(long now) {
         long sig = hud.signature();
         if (hudBitmap != null && sig == renderedHudSig) {
+            return;
+        }
+        if (renderedHudSig != -1 && now - lastHudRenderMs < HUD_RENDER_MIN_MS) {
             return;
         }
         if (hudBitmap == null) {
             hudBitmap = Bitmap.createBitmap(1024, 1024, Bitmap.Config.ARGB_8888);
         }
         renderedHudSig = sig;
+        lastHudRenderMs = now;
         synchronized (renderer.hudLock) {
             hud.renderEye(hudBitmap);
             renderer.invalidateHud(hudBitmap);
@@ -967,6 +1024,10 @@ public class PlayerActivity extends Activity
 
     private void closeOverlay(String status) {
         long now = SystemClock.elapsedRealtime();
+        Log.i("Gazeline", "closeOverlay '" + status + "' ov=" + overlay
+                + " leaveSince=" + menuLeaveSince + " openedAgo=" + (now - menuOpenedAt)
+                + " rel=" + menuGaze.readout().relYaw + "," + menuGaze.readout().relPitch
+                + " by " + new Throwable().getStackTrace()[1]);
         overlay = OVERLAY_NONE;
         overlayAlpha = 0f;
         overlayHint = "";

@@ -34,6 +34,9 @@ final class GazeController {
         float dwell;
         float relYaw;
         float relPitch;
+        /** The layer's anchor in view space, so the GL projection can place it. */
+        float anchorYaw;
+        float anchorPitch;
         /** 0–1 while the wake gesture is being held; 0 otherwise. */
         float wakeProgress;
         /** Which band that progress belongs to: true for the top of the frame. */
@@ -526,6 +529,8 @@ final class GazeController {
         }
         readout.relYaw = deaden(shownYaw, shownYawOut);
         readout.relPitch = deaden(shownPitch, shownPitchOut);
+        readout.anchorYaw = anchorYaw;
+        readout.anchorPitch = anchorPitch;
         shownYawOut = readout.relYaw;
         shownPitchOut = readout.relPitch;
         readout.wakeProgress = wakeProgress;

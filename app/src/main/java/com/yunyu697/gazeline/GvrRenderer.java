@@ -110,15 +110,65 @@ final class GvrRenderer implements GvrView.StereoRenderer {
             + "  gl_Position = vec4(aPos, 0.0, 1.0);\n"
             + "}\n";
     /**
-     * The HUD arrives as an Android Bitmap, whose first row is the top of the
-     * picture, while GLUtils uploads it so that t=0 is that first row. Sampling
-     * t directly therefore paints the layer upside down, so v is flipped here.
+     * The HUD bitmap is a linear angular map around its anchor: {@code K} UV
+     * units per degree is HudView's {@code pxPerDeg / width}, and the shader
+     * turns every pixel into a ray, rotates it into the content space exactly
+     * like the video does, and reads the angle pair back as UV. A row therefore
+     * sits at its true content direction, so the gaze hit test (linear degrees
+     * around the same anchor) points at what the eye actually sees. The bitmap
+     * is uploaded with row 0 at t=0 (top of the picture), so v drops with pitch.
      */
     private static final String HUD_FS =
-            "precision mediump float;\n"
+            "precision highp float;\n"
             + "uniform sampler2D uTex;\n"
+            + "uniform mat3 uRot;\n"
+            + "uniform vec2 uAnchor;\n"
+            + "uniform float uTanL;\n"
+            + "uniform float uTanR;\n"
+            + "uniform float uTanB;\n"
+            + "uniform float uTanT;\n"
             + "varying vec2 vUv;\n"
-            + "void main() { gl_FragColor = texture2D(uTex, vec2(vUv.x, 1.0 - vUv.y)); }\n";
+            + "const float K = 0.00959931;\n"
+            + "void main() {\n"
+            + "  float tx = mix(uTanL, uTanR, vUv.x);\n"
+            + "  float ty = mix(uTanB, uTanT, vUv.y);\n"
+            + "  vec3 d = normalize(uRot * vec3(tx, ty, -1.0));\n"
+            + "  float yaw = degrees(atan(d.x, -d.z));\n"
+            + "  float pitch = degrees(asin(clamp(d.y, -1.0, 1.0)));\n"
+            + "  float ry = mod(yaw - uAnchor.x + 180.0, 360.0) - 180.0;\n"
+            + "  float rp = pitch - uAnchor.y;\n"
+            + "  vec2 uv = vec2(0.5 + ry * K, 0.5 - rp * K);\n"
+            + "  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;\n"
+            + "  gl_FragColor = texture2D(uTex, uv);\n"
+            + "}\n";
+
+    /** The reticle is the gaze ray itself, so it is drawn head-locked in GL. */
+    private static final String RETICLE_VS =
+            "attribute vec2 aPos;\n"
+            + "uniform vec2 uCenter;\n"
+            + "uniform vec2 uHalf;\n"
+            + "varying vec2 vQ;\n"
+            + "void main() {\n"
+            + "  vQ = aPos;\n"
+            + "  gl_Position = vec4(uCenter + aPos * uHalf, 0.0, 1.0);\n"
+            + "}\n";
+    private static final String RETICLE_FS =
+            "precision mediump float;\n"
+            + "uniform vec4 uColor;\n"
+            + "varying vec2 vQ;\n"
+            + "void main() {\n"
+            + "  float r = length(vQ);\n"
+            + "  float ring = smoothstep(0.55, 0.63, r) - smoothstep(0.78, 0.86, r);\n"
+            + "  float core = 1.0 - smoothstep(0.18, 0.27, r);\n"
+            + "  float a = clamp(max(ring, core), 0.0, 1.0) * uColor.a;\n"
+            + "  gl_FragColor = vec4(uColor.rgb * a, a);\n"
+            + "}\n";
+
+    /** Full-view dim for the recenter mask and the overlay backdrop. */
+    private static final String DIM_FS =
+            "precision mediump float;\n"
+            + "uniform vec4 uColor;\n"
+            + "void main() { gl_FragColor = vec4(uColor.rgb * uColor.a, uColor.a); }\n";
 
     /** Full horizontal angle of the flat virtual screen, matching the old 70° panel. */
     private static final float FLAT_FOV_DEG = 70f;
@@ -164,8 +214,24 @@ final class GvrRenderer implements GvrView.StereoRenderer {
     private int hudProgram;
     private int hudPos;
     private int hudTex;
+    private int hudRot;
+    private int hudAnchor;
+    private int hudTanL;
+    private int hudTanR;
+    private int hudTanB;
+    private int hudTanT;
     private int hudTextureId;
     private boolean hudTextureReady;
+
+    private int reticleProgram;
+    private int reticlePos;
+    private int reticleCenter;
+    private int reticleHalf;
+    private int reticleColor;
+
+    private int dimProgram;
+    private int dimPos;
+    private int dimColor;
 
     private FloatBuffer quad;
 
@@ -183,6 +249,17 @@ final class GvrRenderer implements GvrView.StereoRenderer {
     private volatile float lookYaw;
     private volatile float lookPitch;
 
+    // HUD placement, written on the UI thread and read on the GL thread: the
+    // gaze ray for the reticle, the anchor the bitmap map is centred on, and
+    // the alphas for the reticle and the full-view dim.
+    private volatile float hudGazeYaw;
+    private volatile float hudGazePitch;
+    private volatile float hudAnchorYaw;
+    private volatile float hudAnchorPitch;
+    private volatile float reticleAlpha;
+    private volatile float dimAlpha;
+    private volatile int reticleRgb = 0xFFEAF4FF;
+
     private final float[] eyeToWorld = new float[16];
     private final float[] anchorRot = new float[16];
     private final float[] anchorTranspose = new float[16];
@@ -191,6 +268,9 @@ final class GvrRenderer implements GvrView.StereoRenderer {
     private final float[] rotWorld = new float[16];
     private final float[] rotPass = new float[9];
     private final float[] forward = new float[3];
+    private final float[] gazeInv = new float[16];
+    private final float[] gazeDir = new float[4];
+    private final float[] gazeEye = new float[4];
     private volatile boolean captureAnchor = true;
     private int eyeIndex;
 
@@ -436,6 +516,23 @@ final class GvrRenderer implements GvrView.StereoRenderer {
         hudDirty = true;
     }
 
+    /**
+     * Places the projected HUD for the next frames: the gaze ray (content-space
+     * degrees) for the reticle, the anchor (content-space degrees) the bitmap
+     * map is centred on, the reticle alpha, the full-view dim alpha and the
+     * reticle colour.
+     */
+    void setHudPose(float gazeYawDeg, float gazePitchDeg, float anchorYawDeg,
+                    float anchorPitchDeg, float reticleA, float dimA, int colorRgb) {
+        hudGazeYaw = gazeYawDeg;
+        hudGazePitch = gazePitchDeg;
+        hudAnchorYaw = anchorYawDeg;
+        hudAnchorPitch = anchorPitchDeg;
+        reticleAlpha = reticleA;
+        dimAlpha = dimA;
+        reticleRgb = colorRgb;
+    }
+
     // ------------------------------------------------------------- renderer
 
     @Override
@@ -450,6 +547,8 @@ final class GvrRenderer implements GvrView.StereoRenderer {
         quad = createQuad();
         createContentProgram();
         createHudProgram();
+        createReticleProgram();
+        createDimProgram();
         createProbe();
         fpsStartMs = android.os.SystemClock.elapsedRealtime();
         startDecoder();
@@ -540,7 +639,9 @@ final class GvrRenderer implements GvrView.StereoRenderer {
 
         ProjectionMode m = mode == null ? ProjectionMode.FLAT_MONO : mode;
         drawContent(vp, m, tanHalfX, centerX, tanHalfY, centerY, eyeIndex);
-        drawHud(vp);
+        drawDim();
+        drawHud(tanHalfX, centerX, tanHalfY, centerY);
+        drawReticle(tanHalfX, centerX, tanHalfY, centerY);
         eyeIndex = 1 - eyeIndex;
 
         if (!eyeLogged) {
@@ -612,7 +713,12 @@ final class GvrRenderer implements GvrView.StereoRenderer {
         GLES20.glDisableVertexAttribArray(contentPos);
     }
 
-    private void drawHud(Viewport vp) {
+    /**
+     * The HUD layer projected into the content space: the shader maps each
+     * pixel's ray to the bitmap's linear angle grid around {@code uAnchor}, so
+     * rows keep their true content direction and the reticle can hit them.
+     */
+    private void drawHud(float tanHalfX, float centerX, float tanHalfY, float centerY) {
         if (!hudTextureReady || hudProgram == 0) {
             return;
         }
@@ -620,6 +726,12 @@ final class GvrRenderer implements GvrView.StereoRenderer {
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glUniform1f(hudTanL, centerX - tanHalfX);
+        GLES20.glUniform1f(hudTanR, centerX + tanHalfX);
+        GLES20.glUniform1f(hudTanB, centerY - tanHalfY);
+        GLES20.glUniform1f(hudTanT, centerY + tanHalfY);
+        GLES20.glUniformMatrix3fv(hudRot, 1, false, rotPass, 0);
+        GLES20.glUniform2f(hudAnchor, hudAnchorYaw, hudAnchorPitch);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, hudTextureId);
         GLES20.glUniform1i(hudTex, 0);
@@ -627,6 +739,68 @@ final class GvrRenderer implements GvrView.StereoRenderer {
         GLES20.glVertexAttribPointer(hudPos, 2, GLES20.GL_FLOAT, false, 0, quad);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
         GLES20.glDisableVertexAttribArray(hudPos);
+        GLES20.glDisable(GLES20.GL_BLEND);
+    }
+
+    private void drawDim() {
+        float a = dimAlpha;
+        if (a <= 0.004f || dimProgram == 0) {
+            return;
+        }
+        float al = Math.min(1f, a);
+        GLES20.glUseProgram(dimProgram);
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glUniform4f(dimColor, 0.016f * al, 0.027f * al, 0.047f * al, al);
+        GLES20.glEnableVertexAttribArray(dimPos);
+        GLES20.glVertexAttribPointer(dimPos, 2, GLES20.GL_FLOAT, false, 0, quad);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(dimPos);
+        GLES20.glDisable(GLES20.GL_BLEND);
+    }
+
+    /**
+     * The reticle marks the gaze ray itself, so it must ride with the head,
+     * not with the bitmap. The content-space gaze direction is rotated back
+     * into this eye's frustum and drawn as a small SDF ring at that NDC point.
+     */
+    private void drawReticle(float tanHalfX, float centerX, float tanHalfY, float centerY) {
+        float a = reticleAlpha;
+        if (a <= 0.02f || reticleProgram == 0) {
+            return;
+        }
+        double ry = Math.toRadians(hudGazeYaw);
+        double rp = Math.toRadians(hudGazePitch);
+        gazeDir[0] = (float) (Math.sin(ry) * Math.cos(rp));
+        gazeDir[1] = (float) Math.sin(rp);
+        gazeDir[2] = (float) (-Math.cos(ry) * Math.cos(rp));
+        gazeDir[3] = 1f;
+        transposeRotation(gazeInv, rotWorld);
+        Matrix.multiplyMV(gazeEye, 0, gazeInv, 0, gazeDir, 0);
+        if (gazeEye[2] > -0.05f) {
+            return;
+        }
+        float nx = (gazeEye[0] / -gazeEye[2] - centerX) / tanHalfX;
+        float ny = (gazeEye[1] / -gazeEye[2] - centerY) / tanHalfY;
+        if (nx < -1.15f || nx > 1.15f || ny < -1.15f || ny > 1.15f) {
+            return;
+        }
+        float tanHalfDeg = (float) Math.tan(Math.toRadians(1.5));
+        int c = reticleRgb;
+        GLES20.glUseProgram(reticleProgram);
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glUniform2f(reticleCenter, nx, ny);
+        GLES20.glUniform2f(reticleHalf, tanHalfDeg / tanHalfX, tanHalfDeg / tanHalfY);
+        GLES20.glUniform4f(reticleColor,
+                ((c >> 16) & 0xFF) / 255f, ((c >> 8) & 0xFF) / 255f, (c & 0xFF) / 255f,
+                Math.min(1f, a));
+        GLES20.glEnableVertexAttribArray(reticlePos);
+        GLES20.glVertexAttribPointer(reticlePos, 2, GLES20.GL_FLOAT, false, 0, quad);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+        GLES20.glDisableVertexAttribArray(reticlePos);
         GLES20.glDisable(GLES20.GL_BLEND);
     }
 
@@ -684,6 +858,12 @@ final class GvrRenderer implements GvrView.StereoRenderer {
         hudProgram = GlUtil.link(HUD_VS, HUD_FS);
         hudPos = GLES20.glGetAttribLocation(hudProgram, "aPos");
         hudTex = GlUtil.uniform(hudProgram, "uTex");
+        hudRot = GlUtil.uniform(hudProgram, "uRot");
+        hudAnchor = GlUtil.uniform(hudProgram, "uAnchor");
+        hudTanL = GlUtil.uniform(hudProgram, "uTanL");
+        hudTanR = GlUtil.uniform(hudProgram, "uTanR");
+        hudTanB = GlUtil.uniform(hudProgram, "uTanB");
+        hudTanT = GlUtil.uniform(hudProgram, "uTanT");
         int[] tex = new int[1];
         GLES20.glGenTextures(1, tex, 0);
         hudTextureId = tex[0];
@@ -697,6 +877,20 @@ final class GvrRenderer implements GvrView.StereoRenderer {
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D,
                 GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+    }
+
+    private void createReticleProgram() {
+        reticleProgram = GlUtil.link(RETICLE_VS, RETICLE_FS);
+        reticlePos = GLES20.glGetAttribLocation(reticleProgram, "aPos");
+        reticleCenter = GlUtil.uniform(reticleProgram, "uCenter");
+        reticleHalf = GlUtil.uniform(reticleProgram, "uHalf");
+        reticleColor = GlUtil.uniform(reticleProgram, "uColor");
+    }
+
+    private void createDimProgram() {
+        dimProgram = GlUtil.link(HUD_VS, DIM_FS);
+        dimPos = GLES20.glGetAttribLocation(dimProgram, "aPos");
+        dimColor = GlUtil.uniform(dimProgram, "uColor");
     }
 
     // ------------------------------------------------------------- math
